@@ -214,7 +214,7 @@ WHERE {
         
         assert!(result.is_ok());
         
-        let (_, (_, variables, patterns, _, _, _, _, _, _, _, _, _)) = result.unwrap();
+        let (_, (_, variables, patterns, _, _, _, _, _, _, _, _, _, _)) = result.unwrap();
         
         // Check that variables are parsed correctly
         assert_eq!(variables.len(), 3);
@@ -305,7 +305,7 @@ WHERE {
         
         assert!(result.is_ok());
         
-        let (_, (_, variables, patterns, _, _, prefixes, _, _, _, _, _, _)) = result.unwrap();
+        let (_, (_, variables, patterns, _, _, prefixes, _, _, _, _, _, _, _)) = result.unwrap();
         
         // Check that SELECT * is parsed correctly
         assert_eq!(variables.len(), 1);
@@ -320,5 +320,35 @@ WHERE {
         assert_eq!(patterns[0].0, "?s");
         assert_eq!(patterns[0].1, "?p");
         assert_eq!(patterns[0].2, "?o");
+    }
+
+    #[test]
+    fn test_ml_run_clause() {
+        let input = "RUN {?temp, ?humid, ?occ, ?sun, ?wind, ?hour, ?day} ON ?r TO ?energyprediction.";
+        let result = parse_ml_clause(input);
+
+        assert!(result.is_ok());
+
+        let mut varVec = Vec::new();
+        varVec.push("?temp");
+        varVec.push("?humid");
+        varVec.push("?occ");
+        varVec.push("?sun");
+        varVec.push("?wind");
+        varVec.push("?hour");
+        varVec.push("?day");
+
+        let (_, mlrunclause) = result.unwrap();
+
+        //Check the RUN clause
+        assert_eq!(mlrunclause.run, varVec);
+
+        //Check the ON clause
+        assert_eq!(mlrunclause.on, "?r");
+
+
+        //Check the TO clause
+        assert_eq!(mlrunclause.to, "?energyprediction");
+
     }
 }

@@ -501,6 +501,32 @@ pub fn parse_filter(input: &str) -> IResult<&str, FilterExpression<'_>> {
     Ok((input, expr))
 }
 
+pub fn parse_ml_clause(input: &str) -> IResult<&str, MLClause<'_>> {
+    let (input, _) = tag("RUN").parse(input)?;
+    let (input, _) = multispace0.parse(input)?;
+    let (input, _) = char('{').parse(input)?;
+
+    let (input, args) = separated_list1(
+        (multispace0, char(','), multispace0),
+        alt((variable, parse_literal)),
+    ).parse(input)?;
+
+    let (input, _) = char('}').parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("ON").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, ml) = alt((variable, predicate)).parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("TO").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, output) = terminated(variable, opt((multispace0, char('.')))).parse(input)?;
+
+    Ok((input, MLClause{
+        run: args,
+        on: ml,
+        to: output,
+    }))
+}
 // Parser for BIND clauses: BIND(funcName(?var, "literal") AS ?newVar)
 pub fn parse_bind(input: &str) -> IResult<&str, (&str, Vec<&str>, &str)> {
     let (input, _) = tag("BIND").parse(input)?;
@@ -534,7 +560,7 @@ pub fn parse_subquery<'a>(input: &'a str) -> IResult<&'a str, SubQuery<'a>> {
     let (input, variables) = parse_select(input)?;
 
     // Parse WHERE clause (recursive)
-    let (input, (patterns, filters, values_clause, binds, _, _,)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, _, _, ml_clause_block)) = parse_where(input)?;
 
     let (input, limit) = opt(preceded(multispace0, parse_limit)).parse(input)?;
 
@@ -599,6 +625,7 @@ pub fn parse_where(
         Vec<(&str, Vec<&str>, &str)>,
         Vec<SubQuery<'_>>,
         Vec<WindowBlock<'_>>,
+        Option<MLClause<'_>>
     ),
 > {
     let (input, _) = multispace0.parse(input)?;
@@ -614,6 +641,7 @@ pub fn parse_where(
     let mut values_clause = None;
     let mut window_blocks = Vec::new();
     let mut current_input = input;
+    let mut ml_clause_params = None;
 
     // Parse components until we reach the closing brace
     loop {
@@ -645,6 +673,9 @@ pub fn parse_where(
         } else if let Ok((new_input, vals)) = parse_values(current_input) {
             values_clause = Some(vals);
             new_input
+        } else if let Ok((new_input, mlclause)) = parse_ml_clause(input) {
+            ml_clause_params = Some(mlclause);
+            new_input
         } else {
             return Err(nom::Err::Error(nom::error::Error::new(
                 current_input,
@@ -665,7 +696,7 @@ pub fn parse_where(
 
     Ok((
         current_input,
-        (patterns, filters, values_clause, binds, subqueries, window_blocks),
+        (patterns, filters, values_clause, binds, subqueries, window_blocks, ml_clause_params),
     ))
 }
 
@@ -696,7 +727,7 @@ pub fn parse_register_clause(input: &str) -> IResult<&str, RegisterClause<'_>> {
     let (input, _) = multispace0.parse(input)?;
     
     // Parse WHERE clause with window support
-    let (input, (patterns, filters, values_clause, binds, subqueries, window_blocks)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, subqueries, window_blocks, ml_predict_clause)) = parse_where(input)?;
     
     Ok((input, RegisterClause {
         stream_type,
@@ -906,6 +937,7 @@ pub fn parse_sparql_query(
         Option<usize>,                  // limit
         Vec<WindowBlock<'_>>,               // Add window blocks
         Vec<OrderCondition<'_>>,             // ORDER BY conditions
+        Option<MLClause<'_>>        // ML Clause condition
     ),
 > {
     let mut input = input;
@@ -940,7 +972,7 @@ pub fn parse_sparql_query(
     let (input, _) = multispace0.parse(input)?;
 
     // Parse WHERE clause
-    let (input, (patterns, filters, values_clause, binds, subqueries, window_block)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, subqueries, window_block, parse_sparql_block)) = parse_where(input)?;
 
     // Optionally parse the GROUP BY clause
     let (input, group_vars) =
@@ -971,6 +1003,7 @@ pub fn parse_sparql_query(
             limit,
             window_block,
             order_conditions,
+            parse_sparql_block
         ),
     ))
 }
@@ -1116,8 +1149,8 @@ pub fn parse_ml_predict(input: &str) -> IResult<&str, MLPredictClause<'_>> {
             // Parse WHERE patterns and filters (simplified - use your actual WHERE parser)
             let where_clause = &input_query[where_idx + 5..].trim();
             // This is a placeholder - you should use your actual pattern and filter parser here
-            let (_rest, (patterns, filters, _values, _binds, _subqueries, _)) = 
-                parse_where(where_clause).unwrap_or_else(|_| (where_clause, (vec![], vec![], None, vec![], vec![], vec![])));
+            let (_rest, (patterns, filters, _values, _binds, _subqueries, _, _)) = 
+                parse_where(where_clause).unwrap_or_else(|_| (where_clause, (vec![], vec![], None, vec![], vec![], vec![], None)));
             
             where_patterns = patterns;
             filter_conditions = filters;
@@ -1348,7 +1381,7 @@ pub fn parse_rule(input: &str) -> IResult<&str, CombinedRule<'_>> {
     let (input, _) = multispace0.parse(input)?;
     
     // Parse WHERE clause
-    let (input, (patterns, filters, values_clause, binds, subqueries, _)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, subqueries, _, _)) = parse_where(input)?;
     let body = (patterns, filters, values_clause, binds, subqueries);
     
     // Optional dot at the end of rule
@@ -1488,7 +1521,31 @@ pub fn parse_combined_query(input: &str) -> IResult<&str, CombinedQuery<'_>> {
         (input, (None, vec![], vec![], vec![], vec![], HashMap::new(), None, vec![], vec![], None, vec![], vec![]))
     } else {
         // There's remaining input - try to parse it as SPARQL
-        parse_sparql_query(input)?
+        let (input, (insert_clause,
+            mut variables,
+            patterns,
+            filters,
+            group_vars,
+            parsed_prefixes,
+            values_clause,
+            binds,
+            subqueries,
+            limit,
+            window,
+            order_conditions,
+            _ )) = parse_sparql_query(input)?;
+        (input, (insert_clause,
+            variables,
+            patterns,
+            filters,
+            group_vars,
+            parsed_prefixes,
+            values_clause,
+            binds,
+            subqueries,
+            limit,
+            window,
+            order_conditions))
     }; 
 
     Ok((

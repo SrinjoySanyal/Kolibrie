@@ -42,6 +42,14 @@ pub struct ValuesClause<'a> {
     pub values: Vec<Vec<Value>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MLClause<'a> {
+    pub run: Vec<&'a str>,
+    pub on: &'a str,
+    pub to: &'a str,
+
+}
+
 // Define the InsertClause struct to hold triple patterns for the INSERT clause
 #[derive(Debug, Clone)]
 pub struct InsertClause<'a> {
