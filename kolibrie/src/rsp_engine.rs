@@ -255,6 +255,7 @@ where
                     database,
                     &[],
                     None,
+                    None
                 );
                 println!("\tResults in {:?}", op);
                 op
@@ -312,6 +313,7 @@ where
                 &mut database,
                 &[],
                 None,
+                None
             );
             Some(logical_plan)
         } else {

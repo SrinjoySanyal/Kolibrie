@@ -49,10 +49,16 @@ pub enum LogicalOperator {
     },
     MLPredict {
         input: Box<LogicalOperator>,
-        model_name: String,
+        model_name: ModelGetter,
         input_variables: Vec<String>,
         output_variable: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelGetter {
+    MLPredict(String),
+    RunMLClause(Box<LogicalOperator>)
 }
 
 impl LogicalOperator {
@@ -126,7 +132,21 @@ impl LogicalOperator {
     ) -> Self {
         Self::MLPredict {
             input: Box::new(input),
-            model_name,
+            model_name: ModelGetter::MLPredict(model_name),
+            input_variables,
+            output_variable,
+        }
+    }
+
+    pub fn run_ml_clause_lo(
+        input: LogicalOperator,
+        model_name: LogicalOperator,
+        input_variables: Vec<String>,
+        output_variable: String,
+    ) -> Self {
+        Self::MLPredict {
+            input: Box::new(input),
+            model_name: ModelGetter::RunMLClause(Box::new(model_name)),
             input_variables,
             output_variable,
         }

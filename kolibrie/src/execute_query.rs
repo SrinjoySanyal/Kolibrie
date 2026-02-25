@@ -179,6 +179,7 @@ pub fn execute_query(sparql: &str, database: &mut SparqlDatabase) -> Vec<Vec<Str
             limit,
             _,
             order_conditions,
+            ml_run_clause
         ),
     )) = parse_result
     {
@@ -367,6 +368,7 @@ pub fn execute_query_rayon_parallel2_volcano(
             limit,
             _,
             order_conditions,
+            ml_run_clause
         ),
     )) = parse_result
     {
@@ -412,6 +414,7 @@ pub fn execute_query_rayon_parallel2_volcano(
                 (subject_static, predicate_static, object_static)
             })
             .collect();
+        
 
         // Build indexes before optimization - this is crucial for performance
         // database.build_all_indexes();
@@ -432,6 +435,7 @@ pub fn execute_query_rayon_parallel2_volcano(
                 database,
                 &binds,
                 values_clause.as_ref(),
+                ml_run_clause
             );
 
             let stats = database.cached_stats.as_ref().expect("Error");
@@ -541,6 +545,7 @@ pub fn execute_query_rayon_parallel2_volcano(
                 database,
                 &binds,
                 values_clause.as_ref(),
+                ml_run_clause
             ); 
 
             // Integrate subqueries into the logical plan

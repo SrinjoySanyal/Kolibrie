@@ -351,4 +351,22 @@ WHERE {
         assert_eq!(mlrunclause.to, "?energyprediction");
 
     }
+
+    #[test]
+    fn test_where_with_ml_clause() {
+        let sparql = "WHERE {
+        ?building hvac:temperature 
+        ?temp. ?building hvac:humidity ?humid.  
+        ?building hvac:occupancy ?occ.  
+        ?building hvac:sunlight ?sun.  
+        ?building hvac:windSpeed ?wind.  
+        ?building hvac:hour ?hour.  
+        ?building hvac:dayOfWeek ?day. 
+        ?building hvac:month hvac:february.
+        RUN {?temp, ?humid, ?occ, ?sun, ?wind, ?hour, ?day} ON ?r TO ?energyPrediction. 
+        ?x hvac:hasValue ?energyPrediction.}";
+
+        let result = parse_where(sparql);
+        assert!(result.is_ok()); 
+    }
 }

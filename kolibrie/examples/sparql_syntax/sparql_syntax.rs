@@ -73,6 +73,7 @@ fn streamertail_optimizer_sparql() {
             &mut database,
             &[],
             None,
+            None
         );
 
         // Step 5: Initialize the optimizer and find the best physical plan

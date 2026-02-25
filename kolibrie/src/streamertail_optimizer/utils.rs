@@ -10,10 +10,14 @@
 
 use super::operators::{LogicalOperator, PhysicalOperator};
 use super::types::Condition;
+// use crate::parser::predicate;
+use crate::parser::*;
 use crate::sparql_database::SparqlDatabase;
-use shared::query::{FilterExpression, SubQuery, ValuesClause};
+use nom::combinator::not;
+use shared::query::{FilterExpression, MLClause, SubQuery, ValuesClause};
 use shared::terms::{Term, TriplePattern};
 use std::collections::HashMap;
+use crate::execute_query;
 
 /// Extracts a triple pattern from a physical operator if it's a scan operation
 pub fn extract_pattern(op: &PhysicalOperator) -> Option<&TriplePattern> {
@@ -106,6 +110,7 @@ pub fn build_logical_plan(
     database: &mut SparqlDatabase,
     binds: &[(&str, Vec<&str>, &str)],
     values_clause: Option<&ValuesClause>,
+    ml_run_clause: Option<MLClause>
 ) -> LogicalOperator {
     // Create base operator from VALUES if present, otherwise empty join base
     let mut result = if let Some(values_clause) = values_clause {
@@ -190,8 +195,308 @@ pub fn build_logical_plan(
         let var_names: Vec<String> = variables.into_iter().map(|(_, v)| v.to_string()).collect();
         result = LogicalOperator::projection(result, var_names);
     }
+    
+
+    if let Some(ml_run_clause_val) = ml_run_clause {
+        let mut ml_run_clause_value = ml_run_clause_val.clone();
+        let mut ml_retrieved_in_query = false;
+        let mut maxdepth = 0; 
+        // find the least nested join containing all the variables passed as argument to RUN
+        for var in &ml_run_clause_value.run {
+            // least nested operator has a higher depth than a more nested operator
+            let mut initial = result.clone();
+            let mut depth = patterns.len();
+            let var_str = var.to_string();
+            loop {
+                match initial {
+                    LogicalOperator::Scan { pattern } => {
+                        if let Term::Variable(ref string) = pattern.0 {
+                            if *string == ml_run_clause_value.on.to_string() {
+                                ml_retrieved_in_query = true;
+                            }
+                            if *string == var_str{
+                                if depth > maxdepth {
+                                    maxdepth = depth;
+                                }
+                                break;
+                            }
+                        }
+                        if let Term::Variable(ref string) = pattern.1 {
+                            if *string == ml_run_clause_value.on.to_string() {
+                                ml_retrieved_in_query = true;
+                            }
+                            if *string == var_str{
+                                if (depth > maxdepth) {
+                                    maxdepth = depth;
+                                }
+                                break;
+                            }
+                        }
+                        if let Term::Variable(ref string) = pattern.2 {
+                            if *string == ml_run_clause_value.on.to_string() {
+                                ml_retrieved_in_query = true;
+                            }
+                            if *string == var_str{
+                                if (depth > maxdepth) {
+                                    maxdepth = depth;
+                                }
+                                break;
+                            }
+                        }
+                        break;
+                    },
+                    LogicalOperator::Values { variables, values } => {break;},
+                    LogicalOperator::Projection { ref predicate, variables } => {
+                        initial = *predicate.clone();
+                    }
+                    LogicalOperator::Bind { ref input, function_name, arguments, output_variable } => {
+                        initial = *input.clone();
+                    }
+                    LogicalOperator::Selection { ref predicate, condition } => {
+                        initial = *predicate.clone();
+                    }
+                    LogicalOperator::Join { ref left, ref right } => {
+                        match right.as_ref() {
+                            LogicalOperator::Scan { ref pattern } => {
+                                if let Term::Variable(ref string) = pattern.0 {
+                                    if *string == ml_run_clause_value.on.to_string() {
+                                        ml_retrieved_in_query = true;
+                                    }
+                                    if *string == var_str{
+                                        if (depth > maxdepth) {
+                                            maxdepth = depth;
+                                        }
+                                        break;
+                                    }
+                                }
+                                if let Term::Variable(ref string) = pattern.1 {
+                                    if *string == ml_run_clause_value.on.to_string() {
+                                        ml_retrieved_in_query = true;
+                                    }
+                                    if *string == var_str{
+                                        if (depth > maxdepth) {
+                                            maxdepth = depth;
+                                        }
+                                        break;
+                                    }
+                                }
+                                if let Term::Variable(ref string) = pattern.2 {
+                                    if *string == ml_run_clause_value.on.to_string() {
+                                        ml_retrieved_in_query = true;
+                                    }
+                                    if *string == var_str{
+                                        if (depth > maxdepth) {
+                                            maxdepth = depth;
+                                        }
+                                        break;
+                                    }
+                                }
+                                initial = (**left).clone();
+                                depth -= 1;
+                            },
+                            _ => {
+                                initial = (**left).clone();
+                                depth -= 1;
+                            }
+                        }
+                    }
+                    _ => {break;}
+                }
+            }
+        }
+        let mut insertionMLRun = result.clone();
+        let mut currentDepth = patterns.len();
+        // the left argument of the LogicalOperator::Join at this replacementDepth level 
+        // will have as its left argument a LogicalOperator that collects all the variables passed as argument to
+        // the RUN clause of the Run Ml Clause 
+        let replacementDepth = maxdepth + 1;
+
+        if ml_retrieved_in_query {
+            let mut ml_retrieval_logical_op = result.clone();
+            loop {
+                match &ml_retrieval_logical_op {
+                    LogicalOperator::Scan { pattern } => {
+                        if let Term::Variable(ref string) = pattern.0 {
+                            if *string == ml_run_clause_value.on.to_string() {
+                                break;
+                            }
+                        }
+                        if let Term::Variable(ref string) = pattern.1 {
+                            if *string == ml_run_clause_value.on.to_string() {
+                                break;
+                            }
+                        }
+                        if let Term::Variable(ref string) = pattern.2 {
+                            if *string == ml_run_clause_value.on.to_string() {
+                                break;
+                            }
+                        }
+                        if let Term::Constant(ref string) = pattern.0 {
+                            if *string == database.dictionary.encode(ml_run_clause_value.on) {
+                                break;
+                            }
+                        }
+                        if let Term::Constant(ref string) = pattern.1 {
+                            if *string == database.dictionary.encode(ml_run_clause_value.on) {
+                                break;
+                            }
+                        }
+                        if let Term::Constant(ref string) = pattern.2 {
+                            if *string == database.dictionary.encode(ml_run_clause_value.on) {
+                                break;
+                            }
+                        }
+                        break;
+                    },
+                    LogicalOperator::Values { variables, values } => {break;},
+                    LogicalOperator::Projection { ref predicate, variables } => {
+                        ml_retrieval_logical_op = *predicate.clone();
+                    }
+                    LogicalOperator::Bind { ref input, function_name, arguments, output_variable } => {
+                        ml_retrieval_logical_op = *input.clone();
+                    }
+                    LogicalOperator::Selection { ref predicate, condition } => {
+                        ml_retrieval_logical_op = *predicate.clone();
+                    }
+                    LogicalOperator::Join { ref left, ref right } => {
+                        match right.as_ref() {
+                            LogicalOperator::Scan { ref pattern } => {
+                                if let Term::Variable(ref string) = pattern.0 {
+                                    if *string == ml_run_clause_value.on.to_string() {
+                                        break;
+                                    }
+                                }
+                                if let Term::Variable(ref string) = pattern.1 {
+                                    if *string == ml_run_clause_value.on.to_string() {
+                                        break;
+                                    }
+                                }
+                                if let Term::Variable(ref string) = pattern.2 {
+                                    if *string == ml_run_clause_value.on.to_string() {
+                                        break;
+                                    }
+                                }
+                                if let Term::Constant(ref string) = pattern.0 {
+                                    if *string == database.dictionary.encode(ml_run_clause_value.on) {
+                                        break;
+                                    }
+                                }
+                                if let Term::Constant(ref string) = pattern.1 {
+                                    if *string == database.dictionary.encode(ml_run_clause_value.on) {
+                                        break;
+                                    }
+                                }
+                                if let Term::Constant(ref string) = pattern.2 {
+                                    if *string == database.dictionary.encode(ml_run_clause_value.on) {
+                                        break;
+                                    }
+                                }
+                                ml_retrieval_logical_op = (**left).clone();
+                            },
+                            _ => {
+                                ml_retrieval_logical_op = (**left).clone();
+                            }
+                        }
+                    }
+                    _ => {break;}
+                }
+            }
+            result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
+        } 
+        else {
+            let pattern1 = convert_pattern_to_triple(ml_run_clause_value.on, "rdf:type", "mls:Run", prefixes, database);
+            let pattern2 = convert_pattern_to_triple(ml_run_clause_value.on, "mls:hasOutput", "?mlmodel", prefixes, database);
+            let pattern3 = convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", prefixes, database);
+
+            let mut ml_retrieval_logical_op = LogicalOperator::scan(pattern1);
+            ml_retrieval_logical_op = LogicalOperator::join (ml_retrieval_logical_op, LogicalOperator::scan(pattern2));
+            ml_retrieval_logical_op = LogicalOperator::join(ml_retrieval_logical_op, LogicalOperator::scan(pattern3));
+            ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?mlmodel".to_string()]));
+
+            
+            result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
+        };
+        
+    }
 
     result
+}
+
+fn insert_ml_run_clause_logical_op(
+    currentDepth: usize,
+    replacementDepth: &usize,
+    logicalOp: &LogicalOperator,
+    ml_model_retrieval: Option<LogicalOperator>,
+    input_vars: &Vec<&str>,
+    output_var: &str
+) -> LogicalOperator {
+    if currentDepth == *replacementDepth {
+        match logicalOp {
+            LogicalOperator::Join { left, right } => {
+                if let Some(ml_model_retrieval_operator) = ml_model_retrieval {
+                    let mlop = LogicalOperator::run_ml_clause_lo(left.as_ref().clone(), ml_model_retrieval_operator, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
+                    return LogicalOperator::join(mlop, *right.clone());
+                }
+            }
+            LogicalOperator::Projection { predicate, variables } => {
+            let pred_new = insert_ml_run_clause_logical_op(currentDepth, replacementDepth, predicate, ml_model_retrieval, input_vars, output_var);
+                return LogicalOperator::Projection { 
+                    predicate: Box::new(pred_new), 
+                    variables: variables.clone() 
+                }
+            }
+            LogicalOperator::Selection { predicate, condition } => {
+                let pred_new = insert_ml_run_clause_logical_op(currentDepth, replacementDepth, predicate, ml_model_retrieval, input_vars, output_var);
+                return LogicalOperator::Selection { 
+                    predicate: Box::new(pred_new), 
+                    condition: condition.clone() 
+                }
+            }
+            LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
+                let input_new = insert_ml_run_clause_logical_op(currentDepth, replacementDepth, input, ml_model_retrieval, input_vars, output_var);
+                return LogicalOperator::Bind { 
+                    input: Box::new(input_new), 
+                    function_name: function_name.clone(), 
+                    arguments: arguments.clone(), 
+                    output_variable: output_variable.clone() 
+                }
+                
+            }
+            _ => {return logicalOp.clone()}
+        }
+    }
+    match logicalOp {
+        LogicalOperator::Projection { predicate, variables } => {
+            let pred_new = insert_ml_run_clause_logical_op(currentDepth, replacementDepth, predicate, ml_model_retrieval, input_vars, output_var);
+            return LogicalOperator::Projection { 
+                predicate: Box::new(pred_new), 
+                variables: variables.clone() 
+            }
+        }
+        LogicalOperator::Selection { predicate, condition } => {
+            let pred_new = insert_ml_run_clause_logical_op(currentDepth, replacementDepth, predicate, ml_model_retrieval, input_vars, output_var);
+            return LogicalOperator::Selection { 
+                predicate: Box::new(pred_new), 
+                condition: condition.clone() 
+            }
+        }
+        LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
+            let input_new = insert_ml_run_clause_logical_op(currentDepth, replacementDepth, input, ml_model_retrieval, input_vars, output_var);
+            return LogicalOperator::Bind { 
+                input: Box::new(input_new), 
+                function_name: function_name.clone(), 
+                arguments: arguments.clone(), 
+                output_variable: output_variable.clone() 
+            }
+        }
+        LogicalOperator::Join { ref left, ref right } => {
+            let left_new = insert_ml_run_clause_logical_op(currentDepth - 1, replacementDepth, left.as_ref(), ml_model_retrieval, input_vars, output_var);
+            // let disp = format!("{left_new:?}");
+            // println!("{disp} gets printed");
+            return LogicalOperator::join(left_new, *right.clone())
+        }
+        _ => {logicalOp.clone()}
+    }
 }
 
 // Helper function to convert pattern strings to TriplePattern
@@ -247,6 +552,7 @@ pub fn build_logical_plan_from_subquery(
         database,
         &subquery.binds,
         None,
+        subquery.ml_run_clause.clone()
     );
     
     // Extract variable names for projection
@@ -270,6 +576,27 @@ fn resolve_with_prefixes(uri: &str, prefixes: &HashMap<String, String>) -> Strin
         }
     } else {
         uri.to_string()
+    }
+}
+
+// Helper function to process variables for aggregation
+fn process_variables<'a>(
+    selected_variables: &mut Vec<(String, String)>,
+    aggregation_vars: &mut Vec<(&'a str, &'a str, &'a str)>,
+    variables: Vec<(&'a str, &'a str, Option<&'a str>)>,
+) {
+    for (agg_type, var, opt_output_var) in variables {
+        if agg_type == "SUM" || agg_type == "MIN" || agg_type == "MAX" || agg_type == "AVG" {
+            let output_var = if let Some(name) = opt_output_var {
+                name
+            } else {
+                ""
+            };
+            aggregation_vars.push((agg_type, var, output_var));
+            selected_variables.push(("VAR".to_string(), output_var.to_string()));
+        } else {
+            selected_variables.push((agg_type.to_string(), var.to_string()));
+        }
     }
 }
 
@@ -359,5 +686,416 @@ mod tests {
 
         let unresolved = resolve_with_prefixes("http://other.org/test", &prefixes);
         assert_eq!(unresolved, "http://other.org/test");
+    }
+
+    #[test]
+    fn test_ml_logical_plan_creation() {
+        let database = &mut SparqlDatabase::new();
+        let sparql = r#"PREFIX hvac: <http://example.org#>
+        SELECT ?building ?energyPrediction WHERE {  
+        ?building hvac:temperature ?temp.  
+        ?building hvac:humidity ?humid.  
+        ?building hvac:occupancy ?occ.  
+        ?building hvac:sunlight ?sun.  
+        ?building hvac:windSpeed ?wind.  
+        ?building hvac:hour ?hour.  
+        ?building hvac:dayOfWeek ?day.   
+        RUN {?temp, ?humid, ?occ, ?sun, ?wind, ?hour, ?day} ON ?r TO ?energyPrediction.
+        ?x hvac:hasValue ?energyPrediction.  
+        ?building hvac:madeBy hvac:trumptower.
+        }"#;
+
+        let output = parse_sparql_query(sparql);
+        // print!("{}", output);
+        assert!(output.is_ok());
+
+        let (
+        _,
+        (
+            insert_clause,
+            mut variables,
+            patterns,
+            filters,
+            group_vars,
+            mut parsed_prefixes,
+            values_clause,
+            binds,
+            subqueries,
+            limit,
+            _,
+            order_conditions,
+            ml_run_clause
+        ),
+        ) = output.unwrap();
+
+        parsed_prefixes.insert("hvac".to_string(), "https://housingass.org/measures".to_string());
+
+        let mut selected_variables: Vec<(String, String)> = Vec::new();
+        let mut aggregation_vars: Vec<(&str, &str, &str)> = Vec::new();
+        process_variables(&mut selected_variables, &mut aggregation_vars, variables);
+
+        let produced_logical_operator = build_logical_plan(
+            selected_variables
+                    .iter()
+                    .map(|(t, v)| (t.as_str(), v.as_str()))
+                    .collect(), 
+            patterns, 
+            filters, 
+            &parsed_prefixes, 
+            database, 
+            &binds, 
+            values_clause.as_ref(), 
+            ml_run_clause.clone()
+        );
+
+        assert!(ml_run_clause.clone().is_some());
+        let ml_run_clause_value = ml_run_clause.unwrap();
+
+        let pattern1 = convert_pattern_to_triple(ml_run_clause_value.on, "rdf:type", "mls:Run", &parsed_prefixes, database);
+        let pattern2 = convert_pattern_to_triple(ml_run_clause_value.on, "mls:hasOutput", "?mlmodel", &parsed_prefixes, database);
+        let pattern3 = convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", &parsed_prefixes, database);
+
+        let mut ml_retrieval_logical_op = LogicalOperator::scan(pattern1);
+        ml_retrieval_logical_op = LogicalOperator::join (ml_retrieval_logical_op, LogicalOperator::scan(pattern2));
+        ml_retrieval_logical_op = LogicalOperator::join(ml_retrieval_logical_op, LogicalOperator::scan(pattern3));
+        ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?mlmodel".to_string()]));
+
+        // let mut expected_logical_operator = LogicalOperator::scan(
+        //         convert_pattern_to_triple(
+        //         "?building", 
+        //         "hvac:month", 
+        //         "hvac:february", 
+        //         &parsed_prefixes, 
+        //         database
+        //         )
+        //     );
+        let mut expected_logical_operator = LogicalOperator::scan(
+            convert_pattern_to_triple(
+                "?building", 
+                "hvac:temperature", 
+                "?temp", 
+                &parsed_prefixes, 
+                database
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:humidity", 
+                "?humid", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:occupancy", 
+                "?occ", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:sunlight", 
+                "?sun", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:windSpeed", 
+                "?wind", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:hour", 
+                "?hour", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:dayOfWeek", 
+                "?day", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+
+        let input_vec = ml_run_clause_value.run.clone().iter().map(|x| x.to_string()).collect();
+        let output_str = ml_run_clause_value.to.to_string();
+        expected_logical_operator = LogicalOperator::run_ml_clause_lo(expected_logical_operator, ml_retrieval_logical_op, input_vec, output_str);
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?x", "hvac:hasValue", "?energyPrediction", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?building", "hvac:madeBy", "hvac:trumptower", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::projection(expected_logical_operator, Vec::from(["?building".to_string(), "?energyPrediction".to_string()]));
+
+        assert_eq!(format!("{expected_logical_operator:?}"), format!("{produced_logical_operator:?}"));
+
+    }
+
+    #[test]
+    fn test_ml_logical_plan_creation_with_ml() {
+        let database = &mut SparqlDatabase::new();
+        let sparql = r#"PREFIX hvac: <http://example.org#>
+        SELECT ?building ?energyPrediction WHERE {  
+        ?building hvac:temperature ?temp.  
+        ?building hvac:humidity ?humid.  
+        ?building hvac:occupancy ?occ.  
+        ?building hvac:sunlight ?sun.  
+        ?building hvac:windSpeed ?wind.  
+        ?building hvac:hour ?hour.  
+        ?building hvac:dayOfWeek ?day.
+        ?r rdf:type mls:Run.
+        ?r mls:hasOutput ?ml.
+        ?ml rdf:type mls:Model.   
+        RUN {?temp, ?humid, ?occ, ?sun, ?wind, ?hour, ?day} ON ?r TO ?energyPrediction.
+        ?x hvac:hasValue ?energyPrediction.  
+        ?building hvac:madeBy hvac:trumptower.
+        }"#;
+
+        let output = parse_sparql_query(sparql);
+        // print!("{}", output);
+        assert!(output.is_ok());
+
+        let (
+        _,
+        (
+            insert_clause,
+            mut variables,
+            patterns,
+            filters,
+            group_vars,
+            mut parsed_prefixes,
+            values_clause,
+            binds,
+            subqueries,
+            limit,
+            _,
+            order_conditions,
+            ml_run_clause
+        ),
+        ) = output.unwrap();
+
+        parsed_prefixes.insert("hvac".to_string(), "https://housingass.org/measures".to_string());
+
+        let mut selected_variables: Vec<(String, String)> = Vec::new();
+        let mut aggregation_vars: Vec<(&str, &str, &str)> = Vec::new();
+        process_variables(&mut selected_variables, &mut aggregation_vars, variables);
+
+        let produced_logical_operator = build_logical_plan(
+            selected_variables
+                    .iter()
+                    .map(|(t, v)| (t.as_str(), v.as_str()))
+                    .collect(), 
+            patterns, 
+            filters, 
+            &parsed_prefixes, 
+            database, 
+            &binds, 
+            values_clause.as_ref(), 
+            ml_run_clause.clone()
+        );
+
+        assert!(ml_run_clause.clone().is_some());
+        let ml_run_clause_value = ml_run_clause.unwrap();
+
+        // let mut expected_logical_operator = LogicalOperator::scan(
+        //         convert_pattern_to_triple(
+        //         "?building", 
+        //         "hvac:month", 
+        //         "hvac:february", 
+        //         &parsed_prefixes, 
+        //         database
+        //         )
+        //     );
+        let mut expected_logical_operator = LogicalOperator::scan(
+            convert_pattern_to_triple(
+                "?building", 
+                "hvac:temperature", 
+                "?temp", 
+                &parsed_prefixes, 
+                database
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:humidity", 
+                "?humid", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:occupancy", 
+                "?occ", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:sunlight", 
+                "?sun", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:windSpeed", 
+                "?wind", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:hour", 
+                "?hour", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple(
+                "?building", 
+                "hvac:dayOfWeek", 
+                "?day", 
+                &parsed_prefixes, 
+                database
+                )
+            )
+        );
+
+        let mut ml_retrieval_logical_op = expected_logical_operator.clone();
+        ml_retrieval_logical_op = LogicalOperator::join(
+            ml_retrieval_logical_op, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?r", "rdf:type", "mls:Run", &parsed_prefixes, database)
+            )
+        );
+
+        ml_retrieval_logical_op = LogicalOperator::join(
+            ml_retrieval_logical_op, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?r", "mls:hasOutput", "?ml", &parsed_prefixes, database)
+            )
+        );
+
+        // ml_retrieval_logical_op = LogicalOperator::join(
+        //     ml_retrieval_logical_op, 
+        //     LogicalOperator::scan(
+        //         convert_pattern_to_triple("?ml", "rdf:type", "mls:Model", &parsed_prefixes, database)
+        //     )
+        // );
+
+        let input_vec = ml_run_clause_value.run.clone().iter().map(|x| x.to_string()).collect();
+        let output_str = ml_run_clause_value.to.to_string();
+        expected_logical_operator = LogicalOperator::run_ml_clause_lo(expected_logical_operator, ml_retrieval_logical_op, input_vec, output_str);
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?r", "rdf:type", "mls:Run", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?r", "mls:hasOutput", "?ml", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?ml", "rdf:type", "mls:Model", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?x", "hvac:hasValue", "?energyPrediction", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::join(
+            expected_logical_operator, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?building", "hvac:madeBy", "hvac:trumptower", &parsed_prefixes, database)
+            )
+        );
+
+        expected_logical_operator = LogicalOperator::projection(expected_logical_operator, Vec::from(["?building".to_string(), "?energyPrediction".to_string()]));
+
+        assert_eq!(format!("{expected_logical_operator:?}"), format!("{produced_logical_operator:?}"));
+
     }
 }

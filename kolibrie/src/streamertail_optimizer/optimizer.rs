@@ -14,6 +14,7 @@ use super::operators::{LogicalOperator, PhysicalOperator};
 use super::stats::DatabaseStats;
 
 use crate::sparql_database::SparqlDatabase;
+use crate::streamertail_optimizer::operators::logical::ModelGetter;
 use shared::terms::{Term, TriplePattern};
 use shared::query::FilterExpression;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -330,10 +331,21 @@ impl Streamertail {
                 // Discover model path
                 let model_path = self.discover_model_path();
 
+                let mut modelstr;
+
+                match model_name {
+                    ModelGetter::MLPredict(mlstring) => {
+                        modelstr = mlstring;
+                    }
+                    ModelGetter::RunMLClause(argument) => {
+                        panic!("ML Predict only accepts String model names, not logical operators")
+                    }
+                }
+
                 // Create the physical ML.PREDICT operator
                 let ml_predict_plan = PhysicalOperator::ml_predict(
                     best_input_plan,
-                    model_name.clone(),
+                    modelstr.clone(),
                     model_path,
                     input_variables.clone(),
                     output_variable.clone(),
@@ -585,10 +597,19 @@ impl Streamertail {
                 input_variables,
                 output_variable,
             } => {
+                let mut modelstr;
+                match model_name {
+                    ModelGetter::MLPredict(mlstring) => {
+                        modelstr = mlstring;
+                    }
+                    ModelGetter::RunMLClause(argument) => {
+                        panic!("ML Predict only accepts String model names, not logical operators")
+                    }
+                }
                 format!(
                     "MLPredict({}, model={}, inputs={:?}, output={})",
                     self.serialize_logical_plan(input),
-                    model_name,
+                    modelstr.clone(),
                     input_variables,
                     output_variable
                 )

@@ -64,6 +64,7 @@ pub struct SubQuery<'a> {
     pub binds: Vec<(&'a str, Vec<&'a str>, &'a str)>,        // BIND clauses
     pub _values_clause: Option<ValuesClause<'a>>,            // VALUES clause
     pub limit: Option<usize>, // Add LIMIT support
+    pub ml_run_clause: Option<MLClause<'a>> // Add ML Run Clause support
 }
 
 #[derive(Debug, Clone)]

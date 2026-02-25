@@ -576,6 +576,7 @@ pub fn parse_subquery<'a>(input: &'a str) -> IResult<&'a str, SubQuery<'a>> {
             binds,
             _values_clause: values_clause,
             limit,
+            ml_run_clause: ml_clause_block,
         },
     ))
 }
@@ -673,7 +674,7 @@ pub fn parse_where(
         } else if let Ok((new_input, vals)) = parse_values(current_input) {
             values_clause = Some(vals);
             new_input
-        } else if let Ok((new_input, mlclause)) = parse_ml_clause(input) {
+        } else if let Ok((new_input, mlclause)) = parse_ml_clause(current_input) {
             ml_clause_params = Some(mlclause);
             new_input
         } else {
