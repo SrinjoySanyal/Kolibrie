@@ -18,6 +18,7 @@ use shared::query::{FilterExpression, MLClause, SubQuery, ValuesClause};
 use shared::terms::{Term, TriplePattern};
 use std::collections::HashMap;
 use crate::execute_query;
+use std::sync::Arc;
 
 /// Extracts a triple pattern from a physical operator if it's a scan operation
 pub fn extract_pattern(op: &PhysicalOperator) -> Option<&TriplePattern> {
@@ -199,6 +200,8 @@ pub fn build_logical_plan(
 
     if let Some(ml_run_clause_val) = ml_run_clause {
         let mut ml_run_clause_value = ml_run_clause_val.clone();
+        // variable storing the name of the SPARQL variable representing ML models themselves
+        let ml_models_var = get_ml_var_name(result.clone(), &ml_run_clause_value.on.to_string(), database);
         let mut ml_retrieved_in_query = false;
         let mut maxdepth = 0; 
         // find the least nested join containing all the variables passed as argument to RUN
@@ -310,116 +313,210 @@ pub fn build_logical_plan(
         // will have as its left argument a LogicalOperator that collects all the variables passed as argument to
         // the RUN clause of the Run Ml Clause 
         let replacementDepth = maxdepth + 1;
+        
+        if ml_models_var.is_none() {
+            if ml_retrieved_in_query {
 
-        if ml_retrieved_in_query {
-            let mut ml_retrieval_logical_op = result.clone();
-            loop {
-                match &ml_retrieval_logical_op {
-                    LogicalOperator::Scan { pattern } => {
-                        if let Term::Variable(ref string) = pattern.0 {
-                            if *string == ml_run_clause_value.on.to_string() {
-                                break;
-                            }
-                        }
-                        if let Term::Variable(ref string) = pattern.1 {
-                            if *string == ml_run_clause_value.on.to_string() {
-                                break;
-                            }
-                        }
-                        if let Term::Variable(ref string) = pattern.2 {
-                            if *string == ml_run_clause_value.on.to_string() {
-                                break;
-                            }
-                        }
-                        if let Term::Constant(ref string) = pattern.0 {
-                            if *string == database.dictionary.encode(ml_run_clause_value.on) {
-                                break;
-                            }
-                        }
-                        if let Term::Constant(ref string) = pattern.1 {
-                            if *string == database.dictionary.encode(ml_run_clause_value.on) {
-                                break;
-                            }
-                        }
-                        if let Term::Constant(ref string) = pattern.2 {
-                            if *string == database.dictionary.encode(ml_run_clause_value.on) {
-                                break;
-                            }
-                        }
-                        break;
-                    },
-                    LogicalOperator::Values { variables, values } => {break;},
-                    LogicalOperator::Projection { ref predicate, variables } => {
-                        ml_retrieval_logical_op = *predicate.clone();
-                    }
-                    LogicalOperator::Bind { ref input, function_name, arguments, output_variable } => {
-                        ml_retrieval_logical_op = *input.clone();
-                    }
-                    LogicalOperator::Selection { ref predicate, condition } => {
-                        ml_retrieval_logical_op = *predicate.clone();
-                    }
-                    LogicalOperator::Join { ref left, ref right } => {
-                        match right.as_ref() {
-                            LogicalOperator::Scan { ref pattern } => {
-                                if let Term::Variable(ref string) = pattern.0 {
-                                    if *string == ml_run_clause_value.on.to_string() {
-                                        break;
-                                    }
-                                }
-                                if let Term::Variable(ref string) = pattern.1 {
-                                    if *string == ml_run_clause_value.on.to_string() {
-                                        break;
-                                    }
-                                }
-                                if let Term::Variable(ref string) = pattern.2 {
-                                    if *string == ml_run_clause_value.on.to_string() {
-                                        break;
-                                    }
-                                }
-                                if let Term::Constant(ref string) = pattern.0 {
-                                    if *string == database.dictionary.encode(ml_run_clause_value.on) {
-                                        break;
-                                    }
-                                }
-                                if let Term::Constant(ref string) = pattern.1 {
-                                    if *string == database.dictionary.encode(ml_run_clause_value.on) {
-                                        break;
-                                    }
-                                }
-                                if let Term::Constant(ref string) = pattern.2 {
-                                    if *string == database.dictionary.encode(ml_run_clause_value.on) {
-                                        break;
-                                    }
-                                }
-                                ml_retrieval_logical_op = (**left).clone();
-                            },
-                            _ => {
-                                ml_retrieval_logical_op = (**left).clone();
-                            }
-                        }
-                    }
-                    _ => {break;}
-                }
+                // get the operator to retrieve the ml models on which to run the code, without the last projection layer
+                let mut ml_retrieval_logical_op = get_least_nested_join_with_scan_on_str(ml_run_clause_val.on.to_string(), result.clone(), database).unwrap();
+                let pattern2 = convert_pattern_to_triple(ml_run_clause_value.on, "mls:hasOutput", "?mlmodel", prefixes, database);
+                let pattern3 = convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", prefixes, database);
+
+                ml_retrieval_logical_op = LogicalOperator::join (ml_retrieval_logical_op, LogicalOperator::scan(pattern2));
+                ml_retrieval_logical_op = LogicalOperator::join(ml_retrieval_logical_op, LogicalOperator::scan(pattern3));
+                ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?mlmodel".to_string()]));
+
+                result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
+            } 
+            else {
+                let pattern1 = convert_pattern_to_triple(ml_run_clause_value.on, "rdf:type", "mls:Run", prefixes, database);
+                let pattern2 = convert_pattern_to_triple(ml_run_clause_value.on, "mls:hasOutput", "?mlmodel", prefixes, database);
+                let pattern3 = convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", prefixes, database);
+
+                let mut ml_retrieval_logical_op = LogicalOperator::scan(pattern1);
+                ml_retrieval_logical_op = LogicalOperator::join (ml_retrieval_logical_op, LogicalOperator::scan(pattern2));
+                ml_retrieval_logical_op = LogicalOperator::join(ml_retrieval_logical_op, LogicalOperator::scan(pattern3));
+                ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?mlmodel".to_string()]));
+
+                
+                result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
             }
-            result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
-        } 
-        else {
-            let pattern1 = convert_pattern_to_triple(ml_run_clause_value.on, "rdf:type", "mls:Run", prefixes, database);
-            let pattern2 = convert_pattern_to_triple(ml_run_clause_value.on, "mls:hasOutput", "?mlmodel", prefixes, database);
-            let pattern3 = convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", prefixes, database);
+        }
+        if let Some(join_logical_operator_with_ml_var) = ml_models_var {
+            let mut ml_retrieval_logical_op = get_least_nested_join_with_scan_on_str(join_logical_operator_with_ml_var.clone(), result.clone(), database).unwrap();
+            // let retndop = format!("{ml_retrieval_logical_op:?}");
+            // println!("returned logical op {retndop}");
+            ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from([join_logical_operator_with_ml_var]));
+            let retndop2 = format!("{ml_retrieval_logical_op:?}");
 
-            let mut ml_retrieval_logical_op = LogicalOperator::scan(pattern1);
-            ml_retrieval_logical_op = LogicalOperator::join (ml_retrieval_logical_op, LogicalOperator::scan(pattern2));
-            ml_retrieval_logical_op = LogicalOperator::join(ml_retrieval_logical_op, LogicalOperator::scan(pattern3));
-            ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?mlmodel".to_string()]));
-
-            
             result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
-        };
+        }
         
     }
 
     result
+}
+
+fn get_least_nested_join_with_scan_on_str(
+    targetStr: String,
+    logicalOp: LogicalOperator,
+    database: &mut SparqlDatabase
+) -> Option<LogicalOperator> {
+        match logicalOp {
+            LogicalOperator::Scan { pattern } => {
+                if let Term::Variable(ref string) = pattern.0 {
+                    if *string == targetStr {
+                        return Some(LogicalOperator::scan(pattern.clone()));
+                    }
+                }
+                if let Term::Variable(ref string) = pattern.1 {
+                    if *string == targetStr {
+                        return Some(LogicalOperator::scan(pattern.clone()));
+                    }
+                }
+                if let Term::Variable(ref string) = pattern.2 {
+                    if *string == targetStr {
+                        return Some(LogicalOperator::scan(pattern.clone()));
+                    }
+                }
+                
+                let dict_extracted = database.dictionary.write().unwrap();
+                if let Term::Constant(ref id) = pattern.0 {
+                    let cst_for_mlmodel = dict_extracted.decode(*id);
+                    if cst_for_mlmodel.unwrap() == targetStr {
+                        return Some(LogicalOperator::scan(pattern.clone()));
+                    }
+                }
+                if let Term::Constant(ref id) = pattern.1 {
+                    let cst_for_mlmodel = dict_extracted.decode(*id);
+                    if cst_for_mlmodel.unwrap() == targetStr {
+                        return Some(LogicalOperator::scan(pattern.clone()));
+                    }
+                }
+                if let Term::Constant(ref id) = pattern.2 {
+                    let cst_for_mlmodel = dict_extracted.decode(*id);
+                    if cst_for_mlmodel.unwrap() == targetStr {
+                        return Some(LogicalOperator::scan(pattern.clone()));
+                    }
+                }
+                return None;
+            },
+            // LogicalOperator::Values { variables, values } => {return None;},
+            LogicalOperator::Projection { ref predicate, variables } => {
+                return get_least_nested_join_with_scan_on_str(targetStr, (**predicate).clone(), database);
+            }
+            LogicalOperator::Bind { ref input, function_name, arguments, output_variable } => {
+                return get_least_nested_join_with_scan_on_str(targetStr, (**input).clone(), database)
+            }
+            LogicalOperator::Selection { ref predicate, condition } => {
+                return get_least_nested_join_with_scan_on_str(targetStr, (**predicate).clone(), database);
+            }
+            LogicalOperator::Join { ref left, ref right } => {
+                match right.as_ref() {
+                    LogicalOperator::Scan { pattern } => {
+                        if let Term::Variable(ref string) = pattern.0 {
+                            if *string == targetStr {
+                                return Some(LogicalOperator::join(*left.clone(), *right.clone()));
+                            }
+                        }
+                        if let Term::Variable(ref string) = pattern.1 {
+                            if *string == targetStr {
+                                return Some(LogicalOperator::join(*left.clone(), *right.clone()));
+                            }
+                        }
+                        if let Term::Variable(ref string) = pattern.2 {
+                            if *string == targetStr {
+                                return Some(LogicalOperator::join(*left.clone(), *right.clone()));
+                            }
+                        }
+                        
+                        if let Term::Constant(ref id) = pattern.0 {
+                            let cst_for_mlmodel = &database.dictionary.write().unwrap().decode(*id).unwrap().to_string();
+                            if *cst_for_mlmodel == targetStr {
+                                return Some(LogicalOperator::join(*left.clone(), *right.clone()));
+                            }
+                        }
+                        if let Term::Constant(ref id) = pattern.1 {
+                            let cst_for_mlmodel = &database.dictionary.write().unwrap().decode(*id).unwrap().to_string();
+                            if *cst_for_mlmodel == targetStr {
+                                return Some(LogicalOperator::join(*left.clone(), *right.clone()));
+                            }
+                        }
+                        if let Term::Constant(ref id) = pattern.2 {
+                            let cst_for_mlmodel = &database.dictionary.write().unwrap().decode(*id).unwrap().to_string();;
+                            if *cst_for_mlmodel == targetStr {
+                                return Some(LogicalOperator::join(*left.clone(), *right.clone()));
+                            }
+                        }
+                        database.dictionary.clear_poison();
+                        return get_least_nested_join_with_scan_on_str(targetStr, (**left).clone(), database);
+                    },
+                    _ => {
+                        return get_least_nested_join_with_scan_on_str(targetStr, (**left).clone(), database);
+                    }
+                }
+            }
+            _ => {
+                println!("here I am");
+                return None;
+            }
+    }
+}
+
+fn get_ml_var_name(
+    mut operator: LogicalOperator,
+    runtimeVar: &String,
+    database: &mut SparqlDatabase
+) -> Option<String> {
+    match operator {
+        LogicalOperator::Projection { predicate, variables } => {
+            return get_ml_var_name(*predicate, runtimeVar, database);
+        }
+        LogicalOperator::Selection { predicate, condition } => {
+            return get_ml_var_name(*predicate, runtimeVar, database);
+        }
+        LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
+            return get_ml_var_name(*input, runtimeVar, database);
+        }
+        LogicalOperator::Scan { pattern } => {
+            if let Term::Variable(var) = pattern.0 {
+                if var == *runtimeVar {
+                    if let Term::Constant(id) = pattern.1 {
+                        if let Some(pred_var) = database.dictionary.write().unwrap().decode(id) {
+                            if pred_var.to_string() == resolve_with_prefixes("mls:hasOutput", &database.prefixes) {
+                                if let Term::Variable(ml_var) = pattern.2 {
+                                    return Some(ml_var)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return None
+        }
+        LogicalOperator::Join { left, right } => {
+            match right.as_ref() {
+                LogicalOperator::Scan { pattern } => {
+                    if let Term::Variable(var) = pattern.0.clone() {
+                        if var == *runtimeVar {
+                            if let Term::Constant(id) = pattern.1 {
+                                if let Some(pred_var) = database.dictionary.write().unwrap().decode(id) {
+                                    if pred_var.to_string() == resolve_with_prefixes("mls:hasOutput", &database.prefixes) {
+                                        if let Term::Variable(ml_var) = pattern.2.clone() {
+                                            return Some(ml_var)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return get_ml_var_name(*left, runtimeVar, database)
+                }
+                _ => {return get_ml_var_name(*left, runtimeVar, database)}
+            }
+        }
+        _ => {return None}
+    }
 }
 
 fn insert_ml_run_clause_logical_op(
@@ -1051,15 +1148,18 @@ mod tests {
             )
         );
 
-        // ml_retrieval_logical_op = LogicalOperator::join(
-        //     ml_retrieval_logical_op, 
-        //     LogicalOperator::scan(
-        //         convert_pattern_to_triple("?ml", "rdf:type", "mls:Model", &parsed_prefixes, database)
-        //     )
-        // );
+        ml_retrieval_logical_op = LogicalOperator::join(
+            ml_retrieval_logical_op, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?ml", "rdf:type", "mls:Model", &parsed_prefixes, database)
+            )
+        );
+
+        ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?ml".to_string()]));
 
         let input_vec = ml_run_clause_value.run.clone().iter().map(|x| x.to_string()).collect();
         let output_str = ml_run_clause_value.to.to_string();
+
         expected_logical_operator = LogicalOperator::run_ml_clause_lo(expected_logical_operator, ml_retrieval_logical_op, input_vec, output_str);
 
         expected_logical_operator = LogicalOperator::join(
