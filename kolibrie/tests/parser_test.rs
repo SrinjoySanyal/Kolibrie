@@ -353,7 +353,7 @@ WHERE {
     }
 
     #[test]
-    fn test_where_with_ml_clause() {
+    fn test_where_with_run_ml_clause() {
         let sparql = "WHERE {
         ?building hvac:temperature 
         ?temp. ?building hvac:humidity ?humid.  

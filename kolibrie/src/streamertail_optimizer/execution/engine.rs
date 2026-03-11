@@ -10,7 +10,7 @@
 
 use super::super::operators::PhysicalOperator;
 
-use crate::sparql_database::SparqlDatabase;
+use crate::{sparql_database::SparqlDatabase, streamertail_optimizer::operators::physical::ModelGetterPhysical};
 use ml::MLPredictionResult;
 use rayon::prelude::*;
 
@@ -244,28 +244,67 @@ impl ExecutionEngine {
                 output_variable,
             } => {
                 // Execute the input operator first
-                let input_results = Self::execute_with_ids(input, database);
+                let mut input_results = Self::execute_with_ids(input, database);
                 
                 if input_results.is_empty() {
                     return input_results;
                 }
 
-                println!("[ML.PREDICT] Executing prediction with model: {}", model_name);
-                println!("[ML.PREDICT] Model path: {}", model_path);
-                println!("[ML.PREDICT] Input variables: {:?}", input_variables);
-                println!("[ML.PREDICT] Output variable: {}", output_variable);
-                println!("[ML.PREDICT] Input rows: {}", input_results.len());
+                match model_name {
+                    ModelGetterPhysical::MLPredictPhysical(somepath) => {
+                        println!("[ML.PREDICT] Executing prediction with model: {}", somepath);
+                        println!("[ML.PREDICT] Model path: {}", model_path);
+                        println!("[ML.PREDICT] Input variables: {:?}", input_variables);
+                        println!("[ML.PREDICT] Output variable: {}", output_variable);
+                        println!("[ML.PREDICT] Input rows: {}", input_results.len());
 
-                // Extract input data for ML prediction
-                let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
+                        // Extract input data for ML prediction
+                        let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
 
-                // Call the existing ML handler infrastructure
-                match Self::invoke_ml_handler( model_path, input_data) {
-                    Ok(predictions) => {
-                        Self::merge_ml_predictions(input_results, predictions, output_variable, database)
+                        // Call the existing ML handler infrastructure
+                        match Self::invoke_ml_handler( (*somepath).as_str(), input_data, 3) {
+                            Ok(predictions) => {
+                                Self::merge_ml_predictions(input_results, predictions, output_variable, database)
+                            }
+                            Err(e) => {
+                                eprintln!("[ML.PREDICT] Error executing ML model: {}", e);
+                                input_results
+                            }
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("[ML.PREDICT] Error executing ML model: {}", e);
+
+                    ModelGetterPhysical::RunMLClausePhysical(physicalop) => {
+                        let models = Self::execute_with_ids(physicalop, database);
+                        let namelist: Vec<HashMap<String, String>> = models.into_iter().map(|id_result| {
+                            let dict = database.dictionary.read().unwrap();
+                            let result = id_result
+                            .into_iter()
+                            .map(|(var, id)| (var, dict.decode(id).unwrap().to_string()))
+                            .collect();
+                            drop(dict);
+                            result
+                            })
+                            .collect();
+
+                        // Extract input data for ML prediction
+                        let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
+
+                        for modelml in namelist{
+                            let modelstr = modelml.values();
+                            for mlmod in modelstr {
+                                let somepath = model_path.clone();
+                                somepath.to_owned().insert_str(model_path.len(), mlmod);
+                                match Self::invoke_ml_handler( somepath.as_str(), input_data.clone(), 1) {
+                                    Ok(predictions) => {
+                                        input_results = Self::merge_ml_predictions(input_results, predictions, output_variable, database)
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[ML.PREDICT] Error executing ML model: {}", e);
+                                        return input_results
+                                    }
+                                }
+                            }
+                        }
                         input_results
                     }
                 }
@@ -352,6 +391,7 @@ impl ExecutionEngine {
     fn invoke_ml_handler(
         model_dir: &str,
         input_data: Vec<Vec<f64>>,
+        min_ml_models: usize
     ) -> Result<MLPredictionResult, Box<dyn std::error::Error>> {
         use ml::MLHandler;
         use ml::generate_ml_models;
@@ -372,7 +412,7 @@ impl ExecutionEngine {
                 path.is_file() && path.extension().map_or(false, |ext| ext == "pkl") &&
                 path.file_stem().and_then(|s| s.to_str()).map_or(false, |stem| stem.ends_with("_predictor"))
             })
-            .count() >= 3;
+            .count() >= min_ml_models;
         
         if !models_exist {
             println!("[ML.PREDICT] Models not found. Generating models...");

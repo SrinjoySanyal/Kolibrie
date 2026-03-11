@@ -8,6 +8,8 @@
  * you can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::streamertail_optimizer::PhysicalOperator;
+
 use super::super::Condition;
 use shared::terms::{TriplePattern, Bindings};
 

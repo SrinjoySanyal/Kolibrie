@@ -166,8 +166,13 @@ impl Streamertail {
                 self.collect_patterns(input, patterns);
             }
             LogicalOperator::Values { .. } => { }
-            LogicalOperator::MLPredict { input, .. } => {
-                self.collect_patterns(input, patterns);
+            LogicalOperator::MLPredict { input, model_name, .. } => {
+                match model_name {
+                    ModelGetter::MLPredict(..) => {
+                        self.collect_patterns(input, patterns);
+                    }
+                    ModelGetter::RunMLClause(..) => { }
+                }
             }
         }
     }
@@ -331,27 +336,35 @@ impl Streamertail {
                 // Discover model path
                 let model_path = self.discover_model_path();
 
-                let mut modelstr;
+                // let mut modelstr;
 
                 match model_name {
                     ModelGetter::MLPredict(mlstring) => {
-                        modelstr = mlstring;
+                        let modelstr = mlstring;
+                        // Create the physical ML.PREDICT operator
+                        let ml_predict_plan = PhysicalOperator::ml_predict(
+                            best_input_plan,
+                            modelstr.clone(),
+                            model_path,
+                            input_variables.clone(),
+                            output_variable.clone(),
+                        );
+
+                        candidates.push(ml_predict_plan);
                     }
                     ModelGetter::RunMLClause(argument) => {
-                        panic!("ML Predict only accepts String model names, not logical operators")
+                        // panic!("ML Predict only accepts String model names, not logical operators")
+                        let ml_predict_plan = PhysicalOperator::run_ml_clause(
+                            best_input_plan,
+                            self.find_best_plan_recursive(argument.as_ref()),
+                            model_path,
+                            input_variables.clone(),
+                            output_variable.clone(),
+                        );
+
+                        candidates.push(ml_predict_plan);
                     }
                 }
-
-                // Create the physical ML.PREDICT operator
-                let ml_predict_plan = PhysicalOperator::ml_predict(
-                    best_input_plan,
-                    modelstr.clone(),
-                    model_path,
-                    input_variables.clone(),
-                    output_variable.clone(),
-                );
-
-                candidates.push(ml_predict_plan);
             }
         }
 
@@ -597,15 +610,14 @@ impl Streamertail {
                 input_variables,
                 output_variable,
             } => {
-                let mut modelstr;
-                match model_name {
+                let modelstr = match model_name {
                     ModelGetter::MLPredict(mlstring) => {
-                        modelstr = mlstring;
+                        mlstring
                     }
                     ModelGetter::RunMLClause(argument) => {
-                        panic!("ML Predict only accepts String model names, not logical operators")
+                        &self.serialize_logical_plan(argument)
                     }
-                }
+                };
                 format!(
                     "MLPredict({}, model={}, inputs={:?}, output={})",
                     self.serialize_logical_plan(input),
@@ -793,9 +805,64 @@ impl Streamertail {
     }
 }
 
+/// Resolves a URI with prefixes
+/// Originally from utils.rs, but I copied it here to make life easier
+fn resolve_with_prefixes(uri: &str, prefixes: &HashMap<String, String>) -> String {
+    if let Some(colon_pos) = uri.find(':') {
+        let (prefix, suffix) = uri.split_at(colon_pos);
+        if let Some(base_uri) = prefixes.get(prefix) {
+            format!("{}{}", base_uri, &suffix[1..]) // Skip the ':'
+        } else {
+            uri.to_string()
+        }
+    } else {
+        uri.to_string()
+    }
+}
+
+// Helper function to convert pattern strings to TriplePattern
+// Originally from utils.rs, but I copied it here to make life easier
+fn convert_pattern_to_triple(
+    subject_str: &str,
+    predicate_str: &str,
+    object_str: &str,
+    prefixes: &HashMap<String, String>,
+    database: &mut SparqlDatabase,
+) -> TriplePattern {
+    let mut dict = database.dictionary.write().unwrap();
+    
+    let subject = if subject_str.starts_with('?') {
+        Term::Variable(subject_str.to_string())
+    } else {
+        let resolved = resolve_with_prefixes(subject_str, prefixes);
+        Term::Constant(dict.encode(&resolved))
+    };
+
+    let predicate = if predicate_str.starts_with('?') {
+        Term::Variable(predicate_str.to_string())
+    } else {
+        let resolved = resolve_with_prefixes(predicate_str, prefixes);
+        Term::Constant(dict.encode(&resolved))
+    };
+
+    let object = if object_str.starts_with('?') {
+        Term::Variable(object_str.to_string())
+    } else {
+        let resolved = resolve_with_prefixes(object_str, prefixes);
+        Term::Constant(dict.encode(&resolved))
+    };
+    
+    drop(dict);
+
+    (subject, predicate, object)
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::streamertail_optimizer::optimizer;
+
     use super::*;
+    use serde::de::Expected;
     use shared::terms::Term;
 
     fn create_test_optimizer() -> Streamertail {
@@ -831,5 +898,130 @@ mod tests {
         let optimizer = create_test_optimizer();
         let pattern = (Term::Constant(1), Term::Constant(2), Term::Constant(3));
         assert_eq!(optimizer.count_bound_variables(&pattern), 3);
+    }
+
+    #[test]
+    fn test_physical_plan_creation_runmlclause() {
+        let database = &mut SparqlDatabase::new();
+        let mut stats = DatabaseStats::new();
+        let mut dict = database.dictionary.write().unwrap();
+
+        let mut prefixes = HashMap::new();
+        let mut optimizer = create_test_optimizer();
+
+        prefixes.insert("hvac".to_string(), "https://factoryass.org/measures".to_string());
+        prefixes.insert("rdf".to_string(), "https://rdf.org".to_string());
+        prefixes.insert("mls".to_string(), "https://mls.org".to_string());
+
+        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor1", &prefixes)), 5);
+        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor2", &prefixes)), 5);
+        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor3", &prefixes)), 5);
+        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasValue", &prefixes)), 5);
+        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("rdf:type", &prefixes)), 2);
+        stats.predicate_cardinalities.insert(dict.encode("mls:hasOutput"), 2);
+        stats.object_cardinalities.insert(dict.encode("mls:Run"), 2);
+        stats.object_cardinalities.insert(dict.encode("mls:Model"), 2);
+
+        drop(dict);
+        
+        
+        let scan1 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor1", "?sensor1", &prefixes, database));
+        let scan2 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor2", "?sensor2", &prefixes, database));
+        let scan3 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor3", "?sensor3", &prefixes, database));
+        let scan4 = LogicalOperator::scan(convert_pattern_to_triple("?x", "hvac:hasValue", "?brokenPrediction", &prefixes, database));
+
+        let mut inputlogicalop = LogicalOperator::join(scan1, scan2);
+        inputlogicalop = LogicalOperator::join(inputlogicalop, scan3);
+        let star_join_physical = inputlogicalop.clone();
+
+        let mlscan1 = LogicalOperator::scan(convert_pattern_to_triple("?r", "rdf:type", "mls:Run", &prefixes, database));
+        let mlscan2 = LogicalOperator::scan(convert_pattern_to_triple("?r", "mls:hasOutput", "?mlmodel", &prefixes, database));
+        let mlscan3 = LogicalOperator::scan(convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", &prefixes, database));
+
+        let mut mllogicalop = LogicalOperator::join(mlscan1, mlscan2);
+        mllogicalop = LogicalOperator::join(mllogicalop, mlscan3);
+        let star_join_ml = mllogicalop.clone();
+        mllogicalop = LogicalOperator::projection(mllogicalop, Vec::from(["?mlmodel".to_string()]));
+
+        inputlogicalop = LogicalOperator::run_ml_clause_lo(inputlogicalop, mllogicalop.clone(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
+        inputlogicalop = LogicalOperator::join(
+            inputlogicalop, 
+            LogicalOperator::scan(
+                convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
+            )
+        );
+        inputlogicalop = LogicalOperator::projection(inputlogicalop, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
+
+        let star_option = optimizer.is_star_query(&star_join_physical);
+        assert!(star_option.is_some());
+        let star = star_option.unwrap();
+        let star_physical = optimizer.build_star_join_from_patterns(star.clone(), &star_join_physical);
+        
+        let star_ml_option = optimizer.is_star_query(&mllogicalop);
+        assert!(star_ml_option.is_some());
+        let star_ml_val = star_ml_option.unwrap();
+        let mut star_ml = optimizer.build_star_join_from_patterns(star_ml_val, &star_join_ml);
+        star_ml = PhysicalOperator::projection(star_ml, Vec::from(["?mlmodel".to_string()]));
+
+        let leftPhys = optimizer.choose_best_scan(
+            &convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
+        );
+        let mut expected_physical_operator = PhysicalOperator::run_ml_clause(star_physical, star_ml, optimizer.discover_model_path(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
+        expected_physical_operator = PhysicalOperator::optimized_hash_join(leftPhys, expected_physical_operator);
+        expected_physical_operator = PhysicalOperator::projection(expected_physical_operator, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
+
+        let produced_physical_operator = optimizer.find_best_plan_recursive(&inputlogicalop);
+        
+        assert_eq!(format!("{expected_physical_operator:?}"), format!("{produced_physical_operator:?}"));
+
+
+        // let database = &mut SparqlDatabase::new();
+        // let sparql = r#"PREFIX hvac: <http://example.org#>
+        // SELECT ?machine ?brokenPrediction WHERE {  
+        // ?machine hvac:hasSensor1 ?sensor1.  
+        // ?machine hvac:hasSensor2 ?sensor2.
+        // ?machine hvac:hasSensor3 ?sensor3.   
+        // RUN {?temp, ?humid, ?occ, ?sun, ?wind, ?hour, ?day} ON ?r TO ?brokenPrediction.
+        // ?x hvac:hasValue ?brokenPrediction.  
+        // }"#;
+
+        // let (
+        // _,
+        // (
+        //     insert_clause,
+        //     mut variables,
+        //     patterns,
+        //     filters,
+        //     group_vars,
+        //     mut parsed_prefixes,
+        //     values_clause,
+        //     binds,
+        //     subqueries,
+        //     limit,
+        //     _,
+        //     order_conditions,
+        //     ml_run_clause
+        // ),
+        // ) = output.unwrap();
+
+        // parsed_prefixes.insert("hvac".to_string(), "https://housingass.org/measures".to_string());
+
+        // let mut selected_variables: Vec<(String, String)> = Vec::new();
+        // let mut aggregation_vars: Vec<(&str, &str, &str)> = Vec::new();
+        // process_variables(&mut selected_variables, &mut aggregation_vars, variables);
+
+        // let produced_logical_operator = build_logical_plan(
+        //     selected_variables
+        //             .iter()
+        //             .map(|(t, v)| (t.as_str(), v.as_str()))
+        //             .collect(), 
+        //     patterns, 
+        //     filters, 
+        //     &parsed_prefixes, 
+        //     database, 
+        //     &binds, 
+        //     values_clause.as_ref(), 
+        //     ml_run_clause.clone()
+        // );
     }
 }

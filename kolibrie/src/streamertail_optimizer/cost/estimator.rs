@@ -8,6 +8,8 @@
  * you can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use crate::streamertail_optimizer::operators::physical::ModelGetterPhysical;
+
 use super::super::operators::PhysicalOperator;
 use super::super::stats::DatabaseStats;
 use super::super::types::Condition;
@@ -174,6 +176,7 @@ impl<'a> CostEstimator<'a> {
             PhysicalOperator::MLPredict {
                 input,
                 input_variables,
+                model_name,
                 ..
             } => {
                 let input_cost = self.estimate_cost(input);
@@ -184,8 +187,17 @@ impl<'a> CostEstimator<'a> {
                 // - Per-row prediction cost: 100 * number of features
                 let python_overhead = 1000;
                 let per_row_cost = 100 * input_variables.len() as u64;
-                
-                input_cost + python_overhead + (cardinality * per_row_cost)
+
+                match model_name {
+                    ModelGetterPhysical::MLPredictPhysical(_) => {
+                        return input_cost + python_overhead + (cardinality * per_row_cost)
+                    }
+                    ModelGetterPhysical::RunMLClausePhysical(logicalop) => {
+                        let ml_retrieval_cost = self.estimate_cost(logicalop.as_ref());
+                        let ml_cardinality = self.estimate_output_cardinality(logicalop.as_ref());
+                        return input_cost + (python_overhead * ml_cardinality) + ml_retrieval_cost + (cardinality * per_row_cost)
+                    }
+                }
             }
         }
     }

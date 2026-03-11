@@ -11,6 +11,12 @@
 use super::super::Condition;
 use shared::terms::{Bindings, TriplePattern};
 
+#[derive(Debug, Clone)]
+pub enum ModelGetterPhysical {
+    MLPredictPhysical(String),
+    RunMLClausePhysical(Box<PhysicalOperator>)
+}
+
 /// Physical operators represent the actual execution plan after optimization
 #[derive(Debug, Clone)]
 pub enum PhysicalOperator {
@@ -68,7 +74,7 @@ pub enum PhysicalOperator {
     },
     MLPredict {
         input: Box<PhysicalOperator>,
-        model_name: String,
+        model_name: ModelGetterPhysical,
         model_path: String,
         input_variables: Vec<String>,
         output_variable: String,
@@ -176,7 +182,23 @@ impl PhysicalOperator {
     ) -> Self {
         Self::MLPredict {
             input: Box::new(input),
-            model_name,
+            model_name: ModelGetterPhysical::MLPredictPhysical(model_name),
+            model_path,
+            input_variables,
+            output_variable,
+        }
+    }
+
+    pub fn run_ml_clause(
+        input: PhysicalOperator,
+        model_name: PhysicalOperator,
+        model_path: String ,
+        input_variables: Vec<String>,
+        output_variable: String,
+    ) -> Self {
+        Self::MLPredict {
+            input: Box::new(input),
+            model_name: ModelGetterPhysical::RunMLClausePhysical(Box::new(model_name)),
             model_path,
             input_variables,
             output_variable,
