@@ -702,7 +702,7 @@ fn process_insert_clause(insert_clause: Option<InsertClause>, database: &mut Spa
 }
 
 // Helper function to process variables for aggregation
-fn process_variables<'a>(
+pub fn process_variables<'a>(
     selected_variables: &mut Vec<(String, String)>,
     aggregation_vars: &mut Vec<(&'a str, &'a str, &'a str)>,
     variables: Vec<(&'a str, &'a str, Option<&'a str>)>,

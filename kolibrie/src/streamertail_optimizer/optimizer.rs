@@ -335,6 +335,7 @@ impl Streamertail {
 
                 // Discover model path
                 let model_path = self.discover_model_path();
+                println!("model path = {model_path}");
 
                 // let mut modelstr;
 
@@ -659,7 +660,7 @@ impl Streamertail {
     }
 
     /// Estimates the cost of a logical plan
-    fn estimate_logical_cost(&self, logical_plan: &LogicalOperator) -> u64 {
+    pub fn estimate_logical_cost(&self, logical_plan: &LogicalOperator) -> u64 {
         let cost_estimator = CostEstimator::new(&self.stats);
 
         match logical_plan {
@@ -928,7 +929,6 @@ mod tests {
         let scan1 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor1", "?sensor1", &prefixes, database));
         let scan2 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor2", "?sensor2", &prefixes, database));
         let scan3 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor3", "?sensor3", &prefixes, database));
-        let scan4 = LogicalOperator::scan(convert_pattern_to_triple("?x", "hvac:hasValue", "?brokenPrediction", &prefixes, database));
 
         let mut inputlogicalop = LogicalOperator::join(scan1, scan2);
         inputlogicalop = LogicalOperator::join(inputlogicalop, scan3);
@@ -973,55 +973,5 @@ mod tests {
         let produced_physical_operator = optimizer.find_best_plan_recursive(&inputlogicalop);
         
         assert_eq!(format!("{expected_physical_operator:?}"), format!("{produced_physical_operator:?}"));
-
-
-        // let database = &mut SparqlDatabase::new();
-        // let sparql = r#"PREFIX hvac: <http://example.org#>
-        // SELECT ?machine ?brokenPrediction WHERE {  
-        // ?machine hvac:hasSensor1 ?sensor1.  
-        // ?machine hvac:hasSensor2 ?sensor2.
-        // ?machine hvac:hasSensor3 ?sensor3.   
-        // RUN {?temp, ?humid, ?occ, ?sun, ?wind, ?hour, ?day} ON ?r TO ?brokenPrediction.
-        // ?x hvac:hasValue ?brokenPrediction.  
-        // }"#;
-
-        // let (
-        // _,
-        // (
-        //     insert_clause,
-        //     mut variables,
-        //     patterns,
-        //     filters,
-        //     group_vars,
-        //     mut parsed_prefixes,
-        //     values_clause,
-        //     binds,
-        //     subqueries,
-        //     limit,
-        //     _,
-        //     order_conditions,
-        //     ml_run_clause
-        // ),
-        // ) = output.unwrap();
-
-        // parsed_prefixes.insert("hvac".to_string(), "https://housingass.org/measures".to_string());
-
-        // let mut selected_variables: Vec<(String, String)> = Vec::new();
-        // let mut aggregation_vars: Vec<(&str, &str, &str)> = Vec::new();
-        // process_variables(&mut selected_variables, &mut aggregation_vars, variables);
-
-        // let produced_logical_operator = build_logical_plan(
-        //     selected_variables
-        //             .iter()
-        //             .map(|(t, v)| (t.as_str(), v.as_str()))
-        //             .collect(), 
-        //     patterns, 
-        //     filters, 
-        //     &parsed_prefixes, 
-        //     database, 
-        //     &binds, 
-        //     values_clause.as_ref(), 
-        //     ml_run_clause.clone()
-        // );
     }
 }

@@ -162,9 +162,20 @@ impl MLHandler {
             let src_dir = model_path.parent().unwrap().parent().unwrap();
             let current_path: Vec<String> = paths.extract()?;
             let src_dir_str = src_dir.to_str().unwrap();
-            
+
             if !current_path.contains(&src_dir_str.to_string()) {
                 paths.call_method1("insert", (0, src_dir_str))?;
+            }
+
+            // Ensure the repository's ml/src (where the Python package lives)
+            // is also on sys.path so imports like `from mlschema import MLSchema` work
+            if let Some(ml_root) = src_dir.parent() {
+                let ml_src = ml_root.join("src");
+                if let Some(ml_src_str) = ml_src.to_str() {
+                    if !current_path.contains(&ml_src_str.to_string()) {
+                        paths.call_method1("insert", (0, ml_src_str))?;
+                    }
+                }
             }
 
             let builtins = py.import("builtins")?;
@@ -426,6 +437,14 @@ pub fn generate_ml_models(model_dir: &std::path::Path, model: &str) -> Result<()
         let sys = py.import("sys")?;
         let path = sys.getattr("path")?;
         path.call_method1("insert", (0, src_dir.to_str().unwrap()))?;
+
+        // Also add the repository's ml/src so the mlschema package is importable
+        if let Some(ml_root) = src_dir.parent() {
+            let ml_src = ml_root.join("src");
+            if ml_src.exists() {
+                path.call_method1("insert", (0, ml_src.to_str().unwrap()))?;
+            }
+        }
         
         // Get the current working directory
         let os = py.import("os")?;

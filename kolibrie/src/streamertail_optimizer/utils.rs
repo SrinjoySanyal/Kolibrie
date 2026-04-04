@@ -199,7 +199,8 @@ pub fn build_logical_plan(
     
 
     if let Some(ml_run_clause_val) = ml_run_clause {
-        let mut ml_run_clause_value = ml_run_clause_val.clone();
+        println!("ml run clause logical = {ml_run_clause_val:?}");
+        let ml_run_clause_value = ml_run_clause_val.clone();
         // variable storing the name of the SPARQL variable representing ML models themselves
         let ml_models_var = get_ml_var_name(result.clone(), &ml_run_clause_value.on.to_string(), database);
         let mut ml_retrieved_in_query = false;
@@ -229,7 +230,7 @@ pub fn build_logical_plan(
                                 ml_retrieved_in_query = true;
                             }
                             if *string == var_str{
-                                if (depth > maxdepth) {
+                                if depth > maxdepth {
                                     maxdepth = depth;
                                 }
                                 break;
@@ -307,6 +308,7 @@ pub fn build_logical_plan(
                 }
             }
         }
+        
         let mut insertionMLRun = result.clone();
         let mut currentDepth = patterns.len();
         // the left argument of the LogicalOperator::Join at this replacementDepth level 
@@ -340,6 +342,7 @@ pub fn build_logical_plan(
 
                 
                 result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
+                // println!("result with no ML retrieval in query = {result:?}");
             }
         }
         if let Some(join_logical_operator_with_ml_var) = ml_models_var {
@@ -347,7 +350,6 @@ pub fn build_logical_plan(
             // let retndop = format!("{ml_retrieval_logical_op:?}");
             // println!("returned logical op {retndop}");
             ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from([join_logical_operator_with_ml_var]));
-            let retndop2 = format!("{ml_retrieval_logical_op:?}");
 
             result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
         }
@@ -457,7 +459,6 @@ fn get_least_nested_join_with_scan_on_str(
                 }
             }
             _ => {
-                println!("here I am");
                 return None;
             }
     }
@@ -527,6 +528,45 @@ fn insert_ml_run_clause_logical_op(
     input_vars: &Vec<&str>,
     output_var: &str
 ) -> LogicalOperator {
+    println!("current depth = {currentDepth}");
+    println!("replacement depth = {replacementDepth}");
+    // In the case where all the patterns in a SPARQL query contain the input variables of the MLRunClause operator,
+    // this operator is pushed down to the first Join 
+    if *replacementDepth > currentDepth {
+        match logicalOp {
+            LogicalOperator::Projection { predicate, variables } => {
+                if let Some(ml_model_retrieval_op) = ml_model_retrieval {
+                    let pred_new = LogicalOperator::run_ml_clause_lo(predicate.as_ref().clone(), ml_model_retrieval_op, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
+                    return LogicalOperator::Projection { 
+                        predicate: Box::new(pred_new), 
+                        variables: variables.clone() 
+                    }
+                }
+            }
+            LogicalOperator::Selection { predicate, condition } => {
+                if let Some(ml_model_retrieval_op) = ml_model_retrieval {
+                    let pred_new = LogicalOperator::run_ml_clause_lo(predicate.as_ref().clone(), ml_model_retrieval_op, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
+                    return LogicalOperator::selection(pred_new, condition.clone());
+                }
+            }
+            LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
+                if let Some(ml_model_retrieval_op) = ml_model_retrieval {
+                    let input_new = LogicalOperator::run_ml_clause_lo(input.as_ref().clone(), ml_model_retrieval_op, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
+                    return LogicalOperator::bind(input_new, function_name.clone(), arguments.clone(), output_variable.clone())
+                }
+            }
+            LogicalOperator::Join { left, right } => {
+                if let Some(ml_model_retrieval_operator) = ml_model_retrieval {
+                    return LogicalOperator::run_ml_clause_lo(logicalOp.clone(), ml_model_retrieval_operator, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
+                }
+            }
+            _ => {return logicalOp.clone();}
+        }
+        // println!("In insert ml where be");
+        // if let Some(ml_model_retrieval_operator) = ml_model_retrieval {
+        //     return LogicalOperator::run_ml_clause_lo(logicalOp.clone(), ml_model_retrieval_operator, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
+        // }
+    }
     if currentDepth == *replacementDepth {
         match logicalOp {
             LogicalOperator::Join { left, right } => {
@@ -829,7 +869,8 @@ mod tests {
         ),
         ) = output.unwrap();
 
-        parsed_prefixes.insert("hvac".to_string(), "https://housingass.org/measures".to_string());
+        parsed_prefixes.insert("mls".to_string(), "https://mls.org".to_string());
+        parsed_prefixes.insert("rdf".to_string(), "https://rdf.org".to_string());
 
         let mut selected_variables: Vec<(String, String)> = Vec::new();
         let mut aggregation_vars: Vec<(&str, &str, &str)> = Vec::new();
@@ -980,6 +1021,7 @@ mod tests {
     fn test_ml_logical_plan_creation_with_ml() {
         let database = &mut SparqlDatabase::new();
         let sparql = r#"PREFIX hvac: <http://example.org#>
+        PREFIX rdf: <http://example2.org#>
         SELECT ?building ?energyPrediction WHERE {  
         ?building hvac:temperature ?temp.  
         ?building hvac:humidity ?humid.  
@@ -1019,7 +1061,7 @@ mod tests {
         ),
         ) = output.unwrap();
 
-        parsed_prefixes.insert("hvac".to_string(), "https://housingass.org/measures".to_string());
+        // parsed_prefixes.insert("mls".to_string(), "https://housingass.org/measures".to_string());
 
         let mut selected_variables: Vec<(String, String)> = Vec::new();
         let mut aggregation_vars: Vec<(&str, &str, &str)> = Vec::new();

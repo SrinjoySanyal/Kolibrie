@@ -98,6 +98,7 @@ impl SparqlDatabase {
     pub fn add_triple(&mut self, triple: Triple) {
         self.triples.insert(triple.clone());
         self.index_manager.insert(&triple);
+        // println!("Inserted triple {triple:?} into index");
     }
     
     pub fn delete_triple(&mut self, triple: &Triple) -> bool {
@@ -556,6 +557,7 @@ impl SparqlDatabase {
                     object: dict.encode(&object),
                 };
                 drop(dict);
+                self.add_triple(triple.clone());
                 self.triples.insert(triple);
             } else {
                 eprintln!("Skipping invalid line: {}", line);

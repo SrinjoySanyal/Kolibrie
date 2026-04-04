@@ -9,12 +9,15 @@
  */
 
 use super::super::operators::PhysicalOperator;
+use::std::iter::zip;
 
 use crate::{sparql_database::SparqlDatabase, streamertail_optimizer::operators::physical::ModelGetterPhysical};
 use ml::MLPredictionResult;
 use rayon::prelude::*;
 
 use shared::terms::{Term, TriplePattern};
+
+use crate::streamertail_optimizer::optimizer::Streamertail;
 
 use std::collections::{HashMap, HashSet};
 
@@ -71,6 +74,7 @@ impl ExecutionEngine {
             }
             PhysicalOperator::Projection { input, variables } => {
                 let input_results = Self::execute_with_ids(input, database);
+                // println!("input results = {input_results:?}");
 
                 // Strip '?' prefix from projection variables for matching
                 let stripped_vars: Vec<String> = variables
@@ -243,15 +247,15 @@ impl ExecutionEngine {
                 input_variables,
                 output_variable,
             } => {
-                // Execute the input operator first
-                let mut input_results = Self::execute_with_ids(input, database);
-                
-                if input_results.is_empty() {
-                    return input_results;
-                }
 
                 match model_name {
                     ModelGetterPhysical::MLPredictPhysical(somepath) => {
+                        // Execute the input operator first
+                        let mut input_results = Self::execute_with_ids(input, database);
+                        
+                        if input_results.is_empty() {
+                            return input_results;
+                        }
                         println!("[ML.PREDICT] Executing prediction with model: {}", somepath);
                         println!("[ML.PREDICT] Model path: {}", model_path);
                         println!("[ML.PREDICT] Input variables: {:?}", input_variables);
@@ -274,8 +278,23 @@ impl ExecutionEngine {
                     }
 
                     ModelGetterPhysical::RunMLClausePhysical(physicalop) => {
+                        let mut input_results = Self::execute_with_ids(input, database);
+                        
+                        if input_results.is_empty() {
+                            return input_results;
+                        }
+                        // I cloned input_results while it still only has the columns representing the input variables
+                        let result_clone = input_results.clone();
+
+                        println!("physical op = {physicalop:?}");
+
                         let models = Self::execute_with_ids(physicalop, database);
-                        let namelist: Vec<HashMap<String, String>> = models.into_iter().map(|id_result| {
+                        // let numModels = models.len();
+                        println!("models = {models:?}");
+                        // Vector of HashMaps which have a single key-value pair
+                        // Each of the HashMaps have the same key: the variable storing the machine learning models
+                        let namelist: Vec<HashMap<String, String>> = models.clone().into_iter()
+                        .map(|id_result| {
                             let dict = database.dictionary.read().unwrap();
                             let result = id_result
                             .into_iter()
@@ -283,28 +302,95 @@ impl ExecutionEngine {
                             .collect();
                             drop(dict);
                             result
-                            })
-                            .collect();
+                        })
+                        .collect();
 
                         // Extract input data for ML prediction
                         let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
 
-                        for modelml in namelist{
-                            let modelstr = modelml.values();
-                            for mlmod in modelstr {
-                                let somepath = model_path.clone();
+                        // map of a variable name to its string value
+                        let modelml = &namelist[0];
+                        // map of a variable name to its variable id
+                        let modelmlcst = &models[0];
+
+                        let modelvars = modelml.keys();
+                        let mut model_var_name = "".to_string();
+                        // take only the first element of modelvars
+                        for (i, key) in modelvars.enumerate() {
+                            if i > 0 {
+                                break;
+                            }
+                            model_var_name = key.to_owned();
+                        }
+                        let modelstr = modelml.values();
+                        let modelcst = modelmlcst.values();
+                        for (mlmod, idmlmod) in zip(modelstr, modelcst) {
+                            if !mlmod.ends_with(mlmod) {
+                                mlmod.to_owned().insert_str(mlmod.len(), ".pkl");
+                            }
+                            let somepath = model_path.clone();
+                            if somepath.ends_with("/"){
                                 somepath.to_owned().insert_str(model_path.len(), mlmod);
+                            } else {
+                                somepath.to_owned().insert_str(model_path.len(), "/");
+                                somepath.to_owned().insert_str(model_path.len(), mlmod);
+                            }
+
+                            // Adding a column to the result table which will contain the name of the ML models used
+                            for i in 0..input_results.len() {
+                                input_results[i].insert(model_var_name.clone(), *idmlmod);
+                            }
+
+                            match Self::invoke_ml_handler( somepath.as_str(), input_data.clone(), 1) {
+                                Ok(predictions) => {
+                                    input_results = Self::merge_ml_predictions(input_results, predictions, output_variable, database)
+                                }
+                                Err(e) => {
+                                    eprintln!("[ML.PREDICT] Error executing ML model: {}", e);
+                                    return input_results
+                                }
+                            }
+                        }
+
+                        for i in 1..namelist.len() {
+                            let modelml = &namelist[i];
+                            let modelmlcst = &models[i];
+                            let modelstr = modelml.values();
+                            let modelcst = modelmlcst.values();
+                            let extra_input = input_results.clone();
+                            // adds extra rows so that they could be populated by columns representing the ml variables
+                            input_results.extend(extra_input);
+                            for (mlmod, idmlmod) in zip(modelstr, modelcst) {
+                                let somepath = model_path.clone();
+                                if somepath.ends_with("/"){
+                                    somepath.to_owned().insert_str(model_path.len(), mlmod);
+                                } else {
+                                    somepath.to_owned().insert_str(model_path.len(), "/");
+                                    somepath.to_owned().insert_str(model_path.len(), mlmod);
+                                }
+
+                                // Adding a column to the cloned_result table which will contain the name of the ML models used
+                                let mut cloned_result = result_clone.clone();
+                                for i in 0..result_clone.len() {
+                                    cloned_result[i].insert(model_var_name.clone(), *idmlmod);
+                                }
+
                                 match Self::invoke_ml_handler( somepath.as_str(), input_data.clone(), 1) {
                                     Ok(predictions) => {
-                                        input_results = Self::merge_ml_predictions(input_results, predictions, output_variable, database)
+                                        cloned_result = Self::merge_ml_predictions(cloned_result, predictions, output_variable, database)
                                     }
                                     Err(e) => {
                                         eprintln!("[ML.PREDICT] Error executing ML model: {}", e);
                                         return input_results
                                     }
                                 }
+                                // println!("cloned result = {cloned_result:?}");
+                                input_results.extend(cloned_result);
+                                // drop(cloned_result);
                             }
+
                         }
+                            
                         input_results
                     }
                 }
@@ -564,12 +650,16 @@ impl ExecutionEngine {
         .collect();
 
         pattern_estimates.sort_by_key(|(_, card)| *card);
+        println!("patterns = {patterns:?}");
+        println!("patterns estimates = {pattern_estimates:?}");
 
         // Execute the MOST SELECTIVE pattern first
         let (most_selective_idx, first_card) = pattern_estimates[0];
         let most_selective_pattern = &patterns[most_selective_idx];
 
         let mut results = Self::execute_index_scan_with_ids(database, most_selective_pattern);
+
+        println!("found results is = {results:?}");
 
         if results.is_empty() {
             return Vec::new();
@@ -617,11 +707,14 @@ impl ExecutionEngine {
                 .into_par_iter()
                 .flat_map(|binding| {
                     if let Some(&join_value) = binding.get(join_var_stripped) {
+                        println!("got join value = {join_value:?}");
                         let mut bound_bindings = HashMap::new();
                         bound_bindings.insert(join_var_stripped.to_string(), join_value);
 
                         let bound_pattern = Self::bind_pattern(pattern, &bound_bindings);
+                        println!("pattern being checked = {bound_pattern:?}");
                         let matches = Self::execute_index_scan_with_ids(database, &bound_pattern);
+                        println!("found matches = {matches:?}");
 
                         matches
                         .into_iter()
@@ -887,15 +980,19 @@ impl ExecutionEngine {
         database: &mut SparqlDatabase,
     ) -> Vec<HashMap<String, u32>> {
         // Execute left side first
+        println!("parallel join physical operator = {left:?}");
         let left_results = Self::execute_with_ids(left, database);
+        println!("left result = {left_results:?}");
 
         // If right side is an index scan, use bind join
         if let Some(right_pattern) = Self::extract_pattern(right) {
+            println!("right pattern = {right_pattern:?}");
             return Self::execute_bind_join_with_ids(left_results, right_pattern, database);
         }
 
         // Execute right side
         let right_results = Self::execute_with_ids(right, database);
+        println!("right result = {right_results:?}");
 
         // If both sides are sorted by join key, use merge join
         if Self::can_use_merge_join(&left_results, &right_results) {
@@ -1151,7 +1248,9 @@ impl ExecutionEngine {
         // Strip '?' prefix from variable name
         let subject_var = subject_var.strip_prefix('?').unwrap_or(&subject_var).to_string();
 
+        println!("scanned index = {predicate}");
         if let Some(obj_map) = database.index_manager.pos.get(&predicate) {
+            println!("found object = {obj_map:?}");
             if let Some(subjects) = obj_map.get(&object) {
                 // Use iterator with pre-sized HashMap
                 subjects.iter().map(|&subject| {
@@ -1205,6 +1304,8 @@ impl ExecutionEngine {
         // Strip '?' prefix from variable names
         let subject_var = subject_var.strip_prefix('?').unwrap_or(&subject_var).to_string();
         let object_var = object_var.strip_prefix('?').unwrap_or(&object_var).to_string();
+
+        println!("objects retrieved: {predicate:?}");
 
         if let Some(obj_map) = database.index_manager.pos.get(&predicate) {
             // Clone variable names once before flat_map
