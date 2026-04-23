@@ -8,13 +8,15 @@
  * you can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+use std::collections::HashMap;
+
 use super::super::Condition;
 use shared::terms::{Bindings, TriplePattern};
 
 #[derive(Debug, Clone)]
 pub enum ModelGetterPhysical {
     MLPredictPhysical(String),
-    RunMLClausePhysical(Box<PhysicalOperator>)
+    RunMLClausePhysical(Vec<HashMap<String, u32>>, Vec<HashMap<String, String>>)
 }
 
 /// Physical operators represent the actual execution plan after optimization
@@ -191,14 +193,15 @@ impl PhysicalOperator {
 
     pub fn run_ml_clause(
         input: PhysicalOperator,
-        model_name: PhysicalOperator,
+        models: Vec<HashMap<String, u32>>,
+        namelist: Vec<HashMap<String, String>>,
         model_path: String ,
         input_variables: Vec<String>,
         output_variable: String,
     ) -> Self {
         Self::MLPredict {
             input: Box::new(input),
-            model_name: ModelGetterPhysical::RunMLClausePhysical(Box::new(model_name)),
+            model_name: ModelGetterPhysical::RunMLClausePhysical(models, namelist),
             model_path,
             input_variables,
             output_variable,

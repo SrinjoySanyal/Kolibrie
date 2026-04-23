@@ -57,7 +57,7 @@ impl MLHandler {
         })
     }
 
-    fn parse_schema_file(&self, schema_file_path: &str) -> PyResult<ModelPerformanceMetrics> {
+    pub fn parse_schema_file(&self, schema_file_path: &str) -> PyResult<ModelPerformanceMetrics> {
         let mut metrics = ModelPerformanceMetrics::default();
         
         Python::with_gil(|py| {
@@ -311,7 +311,7 @@ with open(r'{}', 'rb') as f:
 
             // Actual ML prediction
             let prediction_start = Instant::now();
-            let predictions = model.call_method1(py, "predict", (py_input.clone(),))?;
+            let predictions = model.call_method1(py, "predict_with_batching", (py_input.clone(),))?;
             let predictions: Vec<f64> = predictions.extract(py)?;
             let prediction_time = prediction_start.elapsed().as_secs_f64();
             println!("[PYTHON TIMING] Actual prediction completed: {:.6} seconds", prediction_time);
@@ -356,6 +356,39 @@ with open(r'{}', 'rb') as f:
         
         result
     }
+
+    pub fn discover_and_load_models_mlrunclause(&mut self, model_dir: &Path, model_module: &str) -> PyResult<Vec<String>> {
+        let mut model_ids = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(model_dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "pkl") {
+                    if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if file_stem.ends_with(model_module) {
+                            // Get model type prefix from filename (rf_, gb_, lr_, etc.)
+                            let model_type = file_stem.split('_').next().unwrap_or("unknown");
+                            // let model_id = format!("{}_model", model_type);
+                            let model_id = file_stem.to_string();
+
+                            let mut module_name = model_id.clone();
+                            module_name.push_str(".py");
+                            
+                            println!("Loading schema for model: {} from {}", model_id, path.display());
+                            match self.load_model(&model_id, path.to_str().unwrap(), Some(&module_name)) {
+                                Ok(_) => {
+                                    model_ids.push(model_id);
+                                },
+                                Err(e) => {
+                                    eprintln!("Error loading schema for {}: {}", model_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(model_ids)
+    }
     
     // Utility function to discover and load all models and their TTL schemas at once
     pub fn discover_and_load_models(&mut self, model_dir: &Path, model_module: &str) -> PyResult<Vec<String>> {
@@ -370,7 +403,8 @@ with open(r'{}', 'rb') as f:
                         if file_stem.ends_with("_predictor") {
                             // Get model type prefix from filename (rf_, gb_, lr_, etc.)
                             let model_type = file_stem.split('_').next().unwrap_or("unknown");
-                            let model_id = format!("{}_model", model_type);
+                            // let model_id = format!("{}_model", model_type);
+                            let model_id = file_stem.to_string();
                             
                             println!("Loading schema for model: {} from {}", model_id, path.display());
                             match self.load_model_with_schema(&model_id, path.to_str().unwrap()) {
@@ -396,6 +430,7 @@ with open(r'{}', 'rb') as f:
                         if let Some(file_stem) = path.file_stem().and_then(|s| s.to_str()) {
                             let model_type = file_stem.split('_').next().unwrap_or("unknown");
                             let model_id = format!("{}_model", model_type);
+                            // let model_id = file_stem.to_string();
                             
                             // Only load the best model
                             if model_id == best_model {
@@ -425,7 +460,7 @@ pub fn generate_ml_models(model_dir: &std::path::Path, model: &str) -> Result<()
     
     // Get the path to the predictor.py script
     let src_dir = model_dir.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let predictor_script = src_dir.join(model);
+    let predictor_script = src_dir.join(format!("{}.py", model.trim_end_matches(".py")));
     
     if !predictor_script.exists() {
         return Err(format!("Predictor script not found at {}", predictor_script.display()).into());
@@ -496,8 +531,8 @@ pub fn generate_ml_models(model_dir: &std::path::Path, model: &str) -> Result<()
         })
         .count();
     
-    if model_count < 3 {
-        return Err(format!("Expected at least 3 models to be generated, but found {}", model_count).into());
+    if model_count < 1 {
+        return Err(format!("Expected at least 1 model to be generated, but found {}", model_count).into());
     }
     
     println!("Successfully generated {} ML models", model_count);

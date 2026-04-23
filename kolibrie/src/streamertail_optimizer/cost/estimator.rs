@@ -16,6 +16,8 @@ use super::super::types::Condition;
 use shared::terms::{Term, TriplePattern};
 use shared::query::FilterExpression;
 
+use ml::MLHandler;
+
 /// Cost estimation constants for different operators
 pub struct CostConstants;
 
@@ -177,10 +179,11 @@ impl<'a> CostEstimator<'a> {
                 input,
                 input_variables,
                 model_name,
+                model_path,
                 ..
             } => {
                 let input_cost = self.estimate_cost(input);
-                let cardinality = self.estimate_output_cardinality(input);
+                let input_cardinality = self.estimate_output_cardinality(input);
                 
                 // ML prediction is expensive:
                 // - Python interop overhead: 1000 per call
@@ -190,12 +193,27 @@ impl<'a> CostEstimator<'a> {
 
                 match model_name {
                     ModelGetterPhysical::MLPredictPhysical(_) => {
-                        return input_cost + python_overhead + (cardinality * per_row_cost)
+                        return input_cost + python_overhead + (input_cardinality * per_row_cost)
                     }
-                    ModelGetterPhysical::RunMLClausePhysical(logicalop) => {
-                        let ml_retrieval_cost = self.estimate_cost(logicalop.as_ref());
-                        let ml_cardinality = self.estimate_output_cardinality(logicalop.as_ref());
-                        return input_cost + (python_overhead * ml_cardinality) + ml_retrieval_cost + (cardinality * per_row_cost)
+                    ModelGetterPhysical::RunMLClausePhysical(modelids, modelnames) => {
+                        let mut prediction_time = 0.0;
+                        for modeldict in modelnames {
+                            for model in modeldict.values() {
+                                let mut path = model_path.clone();
+                                path.push_str(model);
+                                path.push_str(".ttl");
+                                if let Ok(mlhandler) = MLHandler::new() {
+                                    if let Ok(metrics) = mlhandler.parse_schema_file(&path.as_str()){
+                                        prediction_time += metrics.prediction_time;
+                                    }
+                                }
+                                else {
+                                    panic!("ml handler cannot be initialised");
+                                }
+                            }
+                        }
+                        let ml_cardinality = modelids.len(); 
+                        return input_cost + input_cardinality * prediction_time as u64;
                     }
                 }
             }
@@ -204,6 +222,7 @@ impl<'a> CostEstimator<'a> {
 
     /// Estimates the cardinality of a triple pattern
     pub fn estimate_cardinality(&self, pattern: &TriplePattern) -> u64 {
+        // Treat QuotedTriple terms as variables for cardinality estimation
         match pattern {
             // Fully bound - always returns 0 or 1
             (Term::Constant(_), Term::Constant(_), Term::Constant(_)) => 1,
@@ -248,6 +267,21 @@ impl<'a> CostEstimator<'a> {
             (Term::Variable(_), Term::Variable(_), Term::Variable(_)) => {
                 self.stats.total_triples
             }
+
+            // Patterns with QuotedTriple terms — estimate based on bound positions
+            _ => {
+                let bound = [&pattern.0, &pattern.1, &pattern.2]
+                    .iter()
+                    .filter(|t| matches!(t, Term::Constant(_)))
+                    .count();
+                let qt_count = self.stats.quoted_triple_count.max(1);
+                match bound {
+                    0 => qt_count.min(self.stats.total_triples),
+                    1 => (qt_count / 5).max(1),
+                    2 => (qt_count / 10).max(1),
+                    _ => 1,
+                }
+            }
         }
     }
 
@@ -288,6 +322,12 @@ impl<'a> CostEstimator<'a> {
             FilterExpression::ArithmeticExpr(_) => {
                 // Conservative estimate for arithmetic expressions
                 0.5
+            }
+            FilterExpression::FunctionCall(func_name, _) => {
+                match *func_name {
+                    "isTRIPLE" => 0.1,
+                    _ => 0.5,
+                }
             }
         }
     }
@@ -403,17 +443,17 @@ impl<'a> CostEstimator<'a> {
 
         match pattern.0 {
             Term::Constant(_) => count += 1,
-            Term::Variable(_) => {}
+            Term::Variable(_) | Term::QuotedTriple(_) => {}
         }
 
         match pattern.1 {
             Term::Constant(_) => count += 1,
-            Term::Variable(_) => {}
+            Term::Variable(_) | Term::QuotedTriple(_) => {}
         }
 
         match pattern.2 {
             Term::Constant(_) => count += 1,
-            Term::Variable(_) => {}
+            Term::Variable(_) | Term::QuotedTriple(_) => {}
         }
 
         count

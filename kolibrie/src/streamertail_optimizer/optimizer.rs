@@ -27,6 +27,17 @@ pub struct Streamertail {
     pub stats: Arc<DatabaseStats>,
 }
 
+fn serialize_arith_expr(expr: &shared::query::ArithmeticExpression) -> String {
+    use shared::query::ArithmeticExpression as AE;
+    match expr {
+        AE::Operand(s) => s.to_string(),
+        AE::Add(l, r) => format!("({} + {})", serialize_arith_expr(l), serialize_arith_expr(r)),
+        AE::Subtract(l, r) => format!("({} - {})", serialize_arith_expr(l), serialize_arith_expr(r)),
+        AE::Multiply(l, r) => format!("({} * {})", serialize_arith_expr(l), serialize_arith_expr(r)),
+        AE::Divide(l, r) => format!("({} / {})", serialize_arith_expr(l), serialize_arith_expr(r)),
+    }
+}
+
 impl Streamertail {
     /// Creates a new volcano optimizer
     pub fn new(database: &SparqlDatabase) -> Self {
@@ -47,8 +58,8 @@ impl Streamertail {
     }
 
     /// Finds the best physical plan for a logical plan
-    pub fn find_best_plan(&mut self, logical_plan: &LogicalOperator) -> PhysicalOperator {
-        self.find_best_plan_recursive(logical_plan)
+    pub fn find_best_plan(&mut self, logical_plan: &LogicalOperator, database: &SparqlDatabase) -> PhysicalOperator {
+        self.find_best_plan_recursive(logical_plan, database)
     }
 
     /// Executes a physical plan and returns results
@@ -66,7 +77,7 @@ impl Streamertail {
         logical_plan: &LogicalOperator,
         database: &mut SparqlDatabase,
     ) -> Vec<HashMap<String, String>> {
-        let physical_plan = self.find_best_plan(logical_plan);
+        let physical_plan = self.find_best_plan(logical_plan, database);
         self.execute_plan(&physical_plan, database)
     }
 
@@ -178,7 +189,7 @@ impl Streamertail {
     }
 
     /// Recursively finds the best plan using dynamic programming with memoization
-    fn find_best_plan_recursive(&mut self, logical_plan: &LogicalOperator) -> PhysicalOperator {
+    fn find_best_plan_recursive(&mut self, logical_plan: &LogicalOperator, database: &SparqlDatabase) -> PhysicalOperator {
         let key = self.create_memo_key(logical_plan);
 
         if let Some(plan) = self.memo.get(&key) {
@@ -230,7 +241,7 @@ impl Streamertail {
                 condition,
             } => {
                 // Transformations: Push down selections
-                let best_child_plan = self.find_best_plan_recursive(predicate);
+                let best_child_plan = self.find_best_plan_recursive(predicate, database);
                 // Implementation rules: Apply selection as a filter
                 candidates.push(PhysicalOperator::filter(best_child_plan, condition.clone()));
             }
@@ -238,7 +249,7 @@ impl Streamertail {
                 predicate,
                 variables,
             } => {
-                let best_child_plan = self.find_best_plan_recursive(predicate);
+                let best_child_plan = self.find_best_plan_recursive(predicate, database);
                 candidates.push(PhysicalOperator::projection(
                     best_child_plan,
                     variables.clone(),
@@ -255,8 +266,8 @@ impl Streamertail {
                     (right, left) // Swap for better order
                 };
 
-                let best_left_plan = self.find_best_plan_recursive(cheaper_side);
-                let best_right_plan = self.find_best_plan_recursive(expensive_side);
+                let best_left_plan = self.find_best_plan_recursive(cheaper_side, database);
+                let best_right_plan = self.find_best_plan_recursive(expensive_side, database);
 
                 // Implementation rules: Different join algorithms
                 candidates.push(PhysicalOperator::optimized_hash_join(
@@ -293,7 +304,7 @@ impl Streamertail {
             }
             LogicalOperator::Subquery { inner, projected_vars } => {
                 // Recursively optimize the inner query
-                let optimized_inner = self.find_best_plan_recursive(inner);
+                let optimized_inner = self.find_best_plan_recursive(inner, database);
                 
                 // Wrap it in a subquery operator with projection
                 let subquery_plan = PhysicalOperator::subquery(
@@ -305,7 +316,7 @@ impl Streamertail {
             }
             LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
                 // Recursively optimize the input
-                let best_input_plan = self.find_best_plan_recursive(input);
+                let best_input_plan = self.find_best_plan_recursive(input, database);
     
                 // Create the physical BIND operator
                 let bind_plan = PhysicalOperator::bind(
@@ -331,11 +342,11 @@ impl Streamertail {
                 output_variable,
             } => {
                 // Recursively optimize the input
-                let best_input_plan = self.find_best_plan_recursive(input);
+                let best_input_plan = self.find_best_plan_recursive(input, database);
 
                 // Discover model path
                 let model_path = self.discover_model_path();
-                println!("model path = {model_path}");
+                // println!("model path = {model_path}");
 
                 // let mut modelstr;
 
@@ -354,10 +365,29 @@ impl Streamertail {
                         candidates.push(ml_predict_plan);
                     }
                     ModelGetter::RunMLClause(argument) => {
-                        // panic!("ML Predict only accepts String model names, not logical operators")
+                        let models = ExecutionEngine::execute_with_ids(&self.find_best_plan_recursive(argument.as_ref(), database), &mut database.clone());
+                        // let numModels = models.len();
+                    
+                        // Vector of HashMaps which have a single key-value pair
+                        // Each of the HashMaps have the same key: the variable storing the machine learning models
+                        let namelist: Vec<HashMap<String, String>> = models.clone().into_iter()
+                        .map(|id_result| {
+                            let dict = database.dictionary.read().unwrap();
+                            let result = id_result
+                            .into_iter()
+                            // maps the id of a model name value to the model value itself
+                            .map(|(var, id)| (var, dict.decode(id).unwrap().to_string()))
+                            .collect();
+                            drop(dict);
+                            result
+                        })
+                        .collect();
+                        println!("[RUN_ML_CLAUSE] Models retrieved: {namelist:?}");
+
                         let ml_predict_plan = PhysicalOperator::run_ml_clause(
                             best_input_plan,
-                            self.find_best_plan_recursive(argument.as_ref()),
+                            models,
+                            namelist,
                             model_path,
                             input_variables.clone(),
                             output_variable.clone(),
@@ -521,17 +551,17 @@ impl Streamertail {
 
         match &pattern.0 {
             Term::Constant(_) => count += 1,
-            Term::Variable(_) => {}
+            Term::Variable(_) | Term::QuotedTriple(_) => {}
         }
 
         match &pattern.1 {
             Term::Constant(_) => count += 1,
-            Term::Variable(_) => {}
+            Term::Variable(_) | Term::QuotedTriple(_) => {}
         }
 
         match &pattern.2 {
             Term::Constant(_) => count += 1,
-            Term::Variable(_) => {}
+            Term::Variable(_) | Term::QuotedTriple(_) => {}
         }
 
         count
@@ -654,7 +684,10 @@ impl Streamertail {
                 format!("NOT({})", self.serialize_filter_expression(inner))
             }
             FilterExpression::ArithmeticExpr(expr) => {
-                format!("ARITH({})", expr)
+                format!("ARITH({})", serialize_arith_expr(expr))
+            }
+            FilterExpression::FunctionCall(name, args) => {
+                format!("{}({})", name, args.join(", "))
             }
         }
     }
@@ -702,14 +735,23 @@ impl Streamertail {
                 // VALUES has very low cost
                 values.len() as u64
             }
-            LogicalOperator::MLPredict { input, input_variables, .. } => {
+            LogicalOperator::MLPredict { input, input_variables, model_name , ..} => {
                 let base_cost = self.estimate_logical_cost(input);
                 let cardinality = self.estimate_output_cardinality_from_logical(input);
-                
-                // ML operations are expensive, so we add significant overhead
                 let ml_overhead = 100; // Cost per prediction
-                // ML prediction cost: base cost + (cardinality * input_features * ML_overhead)
-                base_cost + (cardinality * input_variables.len() as u64 * ml_overhead)
+
+                match model_name {
+                    ModelGetter::MLPredict(..) => {
+                        // ML operations are expensive, so we add significant overhead
+                        // ML prediction cost: base cost + (cardinality * input_features * ML_overhead)
+                        base_cost + (cardinality * input_variables.len() as u64 * ml_overhead)
+                    }
+                    ModelGetter::RunMLClause(operator) => {
+                        let ml_retrieval_cost = self.estimate_logical_cost(operator);
+                        let ml_cardinality = self.estimate_output_cardinality_from_logical(operator);
+                        base_cost + ml_retrieval_cost + (cardinality * ml_cardinality * input_variables.len() as u64 * ml_overhead)
+                    }
+                }
             }
         }
     }
@@ -782,9 +824,17 @@ impl Streamertail {
             LogicalOperator::Values { values, .. } => {
                 values.len() as u64
             }
-            LogicalOperator::MLPredict { input, .. } => {
-                // ML.PREDICT doesn't change cardinality, just adds a column
-                self.estimate_output_cardinality_from_logical(input)
+            LogicalOperator::MLPredict { input, model_name, .. } => {
+                let input_cardinality = self.estimate_output_cardinality_from_logical(input);
+                match model_name {
+                    ModelGetter::MLPredict(..) => {
+                        // ML.PREDICT doesn't change cardinality, just adds a column
+                        return input_cardinality;
+                    }
+                    ModelGetter::RunMLClause(ml_retrieval_operator) => {
+                        return input_cardinality * self.estimate_output_cardinality_from_logical(ml_retrieval_operator)
+                    }
+                }
             }
         }
     }
@@ -904,35 +954,50 @@ mod tests {
     #[test]
     fn test_physical_plan_creation_runmlclause() {
         let database = &mut SparqlDatabase::new();
+        let mut optimizer = create_test_optimizer();
         let mut stats = DatabaseStats::new();
-        let mut dict = database.dictionary.write().unwrap();
+
+        let turtle_data = r#"
+            <http://example.org#machine101> rdf:type <http://example.org#Room> .
+            <http://example.org#machine101> sensor:temperature "22.5" .
+            <http://example.org#machine101> sensor:humidity "45.0" .
+            <http://example.org#machine101> sensor:pressure "21.0" .
+            
+            <http://example.org#machine102> rdf:type <http://example.org#Room> .
+            <http://example.org#machine102> sensor:temperature "23.0" .
+            <http://example.org#machine102> sensor:humidity "52.0" .
+            <http://example.org#machine101> sensor:pressure "22.0" .
+
+            <http://example.org#machineML> rdf:type mls:Run .
+            <http://example.org#machineML> mls:hasOutput rf_temperature_predictor .
+            rf_temperature_predictor rdf:type mls:Model . 
+
+            <http://example.org#machineML2> rdf:type mls:Run .
+            <http://example.org#machineML2> mls:hasOutput gb_temperature_predictor .
+            gb_temperature_predictor rdf:type mls:Model .
+
+        "#;
+        database.parse_turtle(turtle_data);
 
         let mut prefixes = HashMap::new();
-        let mut optimizer = create_test_optimizer();
+        prefixes.insert("rdf".to_string(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string());
+        prefixes.insert("mls".to_string(), "http://www.w3.org/2016/10/mls/".to_string());
+        prefixes.insert("sensor".to_string(), "http://sensordom.org".to_string());
 
-        prefixes.insert("hvac".to_string(), "https://factoryass.org/measures".to_string());
-        prefixes.insert("rdf".to_string(), "https://rdf.org".to_string());
-        prefixes.insert("mls".to_string(), "https://mls.org".to_string());
+        database.set_prefixes(prefixes.clone());
 
-        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor1", &prefixes)), 5);
-        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor2", &prefixes)), 5);
-        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor3", &prefixes)), 5);
-        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasValue", &prefixes)), 5);
-        stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("rdf:type", &prefixes)), 2);
-        stats.predicate_cardinalities.insert(dict.encode("mls:hasOutput"), 2);
-        stats.object_cardinalities.insert(dict.encode("mls:Run"), 2);
-        stats.object_cardinalities.insert(dict.encode("mls:Model"), 2);
+        // we are working with a small dataset so step = 1
+        // => scale_factor = 1
+        // sample_size = 15
+        // scale_factor = 1
+        let stats = database.get_or_build_stats();
 
-        drop(dict);
-        
-        
-        let scan1 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor1", "?sensor1", &prefixes, database));
-        let scan2 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor2", "?sensor2", &prefixes, database));
-        let scan3 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor3", "?sensor3", &prefixes, database));
-
-        let mut inputlogicalop = LogicalOperator::join(scan1, scan2);
-        inputlogicalop = LogicalOperator::join(inputlogicalop, scan3);
-        let star_join_physical = inputlogicalop.clone();
+        let inputScan1 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "sensor:temperature", "?temperature", &prefixes, database));
+        let inputScan2 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "sensor:humidity", "?humidity", &prefixes, database));
+        let inputScan3 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "sensor:pressure", "?pressure", &prefixes, database));
+        let mut inputlogicalop = LogicalOperator::join(inputScan1, inputScan2);
+        inputlogicalop = LogicalOperator::join(inputlogicalop, inputScan3);
+        let star_join_input_lo = inputlogicalop.clone();
 
         let mlscan1 = LogicalOperator::scan(convert_pattern_to_triple("?r", "rdf:type", "mls:Run", &prefixes, database));
         let mlscan2 = LogicalOperator::scan(convert_pattern_to_triple("?r", "mls:hasOutput", "?mlmodel", &prefixes, database));
@@ -940,10 +1005,10 @@ mod tests {
 
         let mut mllogicalop = LogicalOperator::join(mlscan1, mlscan2);
         mllogicalop = LogicalOperator::join(mllogicalop, mlscan3);
-        let star_join_ml = mllogicalop.clone();
+        let star_join_ml_lo: LogicalOperator = mllogicalop.clone();
         mllogicalop = LogicalOperator::projection(mllogicalop, Vec::from(["?mlmodel".to_string()]));
 
-        inputlogicalop = LogicalOperator::run_ml_clause_lo(inputlogicalop, mllogicalop.clone(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
+        inputlogicalop = LogicalOperator::run_ml_clause_lo(inputlogicalop, mllogicalop.clone(), Vec::from(["?temperature".to_string(), "?humidity".to_string(), "?pressure".to_string()]), "?brokenPrediction".to_string());
         inputlogicalop = LogicalOperator::join(
             inputlogicalop, 
             LogicalOperator::scan(
@@ -952,26 +1017,116 @@ mod tests {
         );
         inputlogicalop = LogicalOperator::projection(inputlogicalop, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
 
-        let star_option = optimizer.is_star_query(&star_join_physical);
+        let star_option = optimizer.is_star_query(&star_join_input_lo);
         assert!(star_option.is_some());
         let star = star_option.unwrap();
-        let star_physical = optimizer.build_star_join_from_patterns(star.clone(), &star_join_physical);
+        let star_physical = optimizer.build_star_join_from_patterns(star.clone(), &star_join_input_lo);
         
         let star_ml_option = optimizer.is_star_query(&mllogicalop);
         assert!(star_ml_option.is_some());
         let star_ml_val = star_ml_option.unwrap();
-        let mut star_ml = optimizer.build_star_join_from_patterns(star_ml_val, &star_join_ml);
+        let mut star_ml = optimizer.build_star_join_from_patterns(star_ml_val, &star_join_ml_lo);
         star_ml = PhysicalOperator::projection(star_ml, Vec::from(["?mlmodel".to_string()]));
 
+        let model_path = optimizer.discover_model_path();
+        let models = ExecutionEngine::execute_with_ids(&star_ml, &mut database.clone());
+        let namelist: Vec<HashMap<String, String>> = models.clone().into_iter()
+                        .map(|id_result| {
+                            let dict = database.dictionary.read().unwrap();
+                            let result = id_result
+                            .into_iter()
+                            // maps the id of a model name value to the model value itself
+                            .map(|(var, id)| (var, dict.decode(id).unwrap().to_string()))
+                            .collect();
+                            drop(dict);
+                            result
+                        })
+                        .collect();
+
         let leftPhys = optimizer.choose_best_scan(
-            &convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
+        &convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
         );
-        let mut expected_physical_operator = PhysicalOperator::run_ml_clause(star_physical, star_ml, optimizer.discover_model_path(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
+        let mut expected_physical_operator = PhysicalOperator::run_ml_clause(star_physical, models, namelist, model_path, Vec::from(["?temperature".to_string(), "?humidity".to_string(), "?pressure".to_string()]), "?brokenPrediction".to_string());
         expected_physical_operator = PhysicalOperator::optimized_hash_join(leftPhys, expected_physical_operator);
         expected_physical_operator = PhysicalOperator::projection(expected_physical_operator, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
 
-        let produced_physical_operator = optimizer.find_best_plan_recursive(&inputlogicalop);
+        let produced_physical_operator = optimizer.find_best_plan_recursive(&inputlogicalop, database);
         
         assert_eq!(format!("{expected_physical_operator:?}"), format!("{produced_physical_operator:?}"));
+
     }
+
+    // #[test]
+    // fn test_physical_plan_creation_runmlclause() {
+    //     let database = &mut SparqlDatabase::new();
+    //     let mut stats = DatabaseStats::new();
+    //     let mut dict = database.dictionary.write().unwrap();
+
+    //     let mut prefixes = HashMap::new();
+    //     let mut optimizer = create_test_optimizer();
+
+    //     prefixes.insert("hvac".to_string(), "https://factoryass.org/measures".to_string());
+    //     prefixes.insert("rdf".to_string(), "https://rdf.org".to_string());
+    //     prefixes.insert("mls".to_string(), "https://mls.org".to_string());
+
+    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor1", &prefixes)), 5);
+    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor2", &prefixes)), 5);
+    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor3", &prefixes)), 5);
+    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasValue", &prefixes)), 5);
+    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("rdf:type", &prefixes)), 2);
+    //     stats.predicate_cardinalities.insert(dict.encode("mls:hasOutput"), 2);
+    //     stats.object_cardinalities.insert(dict.encode("mls:Run"), 2);
+    //     stats.object_cardinalities.insert(dict.encode("mls:Model"), 2);
+
+    //     drop(dict);
+        
+        
+    //     let scan1 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor1", "?sensor1", &prefixes, database));
+    //     let scan2 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor2", "?sensor2", &prefixes, database));
+    //     let scan3 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor3", "?sensor3", &prefixes, database));
+
+    //     let mut inputlogicalop = LogicalOperator::join(scan1, scan2);
+    //     inputlogicalop = LogicalOperator::join(inputlogicalop, scan3);
+    //     let star_join_physical = inputlogicalop.clone();
+
+    //     let mlscan1 = LogicalOperator::scan(convert_pattern_to_triple("?r", "rdf:type", "mls:Run", &prefixes, database));
+    //     let mlscan2 = LogicalOperator::scan(convert_pattern_to_triple("?r", "mls:hasOutput", "?mlmodel", &prefixes, database));
+    //     let mlscan3 = LogicalOperator::scan(convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", &prefixes, database));
+
+    //     let mut mllogicalop = LogicalOperator::join(mlscan1, mlscan2);
+    //     mllogicalop = LogicalOperator::join(mllogicalop, mlscan3);
+    //     let star_join_ml = mllogicalop.clone();
+    //     mllogicalop = LogicalOperator::projection(mllogicalop, Vec::from(["?mlmodel".to_string()]));
+
+    //     inputlogicalop = LogicalOperator::run_ml_clause_lo(inputlogicalop, mllogicalop.clone(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
+    //     inputlogicalop = LogicalOperator::join(
+    //         inputlogicalop, 
+    //         LogicalOperator::scan(
+    //             convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
+    //         )
+    //     );
+    //     inputlogicalop = LogicalOperator::projection(inputlogicalop, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
+
+    //     let star_option = optimizer.is_star_query(&star_join_physical);
+    //     assert!(star_option.is_some());
+    //     let star = star_option.unwrap();
+    //     let star_physical = optimizer.build_star_join_from_patterns(star.clone(), &star_join_physical);
+        
+    //     let star_ml_option = optimizer.is_star_query(&mllogicalop);
+    //     assert!(star_ml_option.is_some());
+    //     let star_ml_val = star_ml_option.unwrap();
+    //     let mut star_ml = optimizer.build_star_join_from_patterns(star_ml_val, &star_join_ml);
+    //     star_ml = PhysicalOperator::projection(star_ml, Vec::from(["?mlmodel".to_string()]));
+
+    //     let leftPhys = optimizer.choose_best_scan(
+    //         &convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
+    //     );
+    //     let mut expected_physical_operator = PhysicalOperator::run_ml_clause(star_physical, star_ml, optimizer.discover_model_path(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
+    //     expected_physical_operator = PhysicalOperator::optimized_hash_join(leftPhys, expected_physical_operator);
+    //     expected_physical_operator = PhysicalOperator::projection(expected_physical_operator, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
+
+    //     let produced_physical_operator = optimizer.find_best_plan_recursive(&inputlogicalop);
+        
+    //     assert_eq!(format!("{expected_physical_operator:?}"), format!("{produced_physical_operator:?}"));
+    // }
 }

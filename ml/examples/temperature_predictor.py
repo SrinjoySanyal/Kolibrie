@@ -2,11 +2,11 @@
 # Copyright © 2024 Volodymyr Kadzhaia
 # Copyright © 2024 Pieter Bonte
 # KU Leuven — Stream Intelligence Lab, Belgium
-# 
+#
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # you can obtain one at https://mozilla.org/MPL/2.0/.
-# 
+#
 
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
@@ -14,47 +14,40 @@ from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pickle
 import os
-import sys
 import time
 import psutil
-
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from mlschema import MLSchema
 
 class BasePredictor:
     def __init__(self, feature_names=None):
         self.scaler = StandardScaler()
         self.feature_names = feature_names or ['temperature', 'humidity', 'occupancy']
-        
+
     def train(self, X, y):
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
         start_time = time.time()
         self.model.fit(X_scaled, y)
         self.training_time = time.time() - start_time
-        
+
     def predict(self, X):
         X_scaled = self.scaler.transform(X)
         process = psutil.Process(os.getpid())
         self.memory_usage = process.memory_info().rss / 1024 / 1024  # MB
-        
+
         start_time = time.time()
-        # ‚print(X_scaled)
         predictions = self.model.predict(X_scaled)
         self.prediction_time = time.time() - start_time
-        
+
         # Capture CPU usage
         self.cpu_usage = psutil.cpu_percent(interval=0.1)
-        
+
         return predictions
-    
-    def predict_batch(self, X):
-        X_scaled = self.scaler.transform(X)
-    
+
     def predict_proba(self, X):
         # Default implementation - override in subclasses if needed
         return None
-    
+
     def get_performance_metrics(self):
         return {
             'training_time': getattr(self, 'training_time', 0),
@@ -62,23 +55,23 @@ class BasePredictor:
             'memory_usage_mb': getattr(self, 'memory_usage', 0),
             'cpu_usage_percent': getattr(self, 'cpu_usage', 0)
         }
-    
+
     def save(self, filename):
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
-    
+
     def save_with_schema(self, filename, X_train, y_train, X_test, y_test):
         # Save model to pkl
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
-        
+
         # Generate schema
         schema = MLSchema()
-        
+
         # Define an evaluation function that captures performance metrics
         def eval_func(model, X_test, y_test):
             y_pred = model.predict(X_test)
-            
+
             from sklearn.metrics import mean_squared_error, r2_score
             metrics = {
                 'mse': mean_squared_error(y_test, y_pred),
@@ -89,7 +82,7 @@ class BasePredictor:
                 'cpu_usage_percent': model.get_performance_metrics().get('cpu_usage_percent', 0)
             }
             return metrics
-        
+
         # Generate schema
         schema.convert_model(
             self,
@@ -100,34 +93,34 @@ class BasePredictor:
             model_uri=f"http://example.org/models/{os.path.basename(filename)}",
             evaluation_function=eval_func
         )
-        
+
         # Save schema to file
         schema_filename = filename.replace('.pkl', '.ttl')
         with open(schema_filename, 'w') as f:
             f.write(schema.serialize(format='turtle'))
-        
+
         return schema_filename
-    
+
     def evaluate(self, X_test, y_test):
         """Calculate evaluation metrics and store them"""
         from sklearn.metrics import mean_squared_error, r2_score
-        
+
         y_pred = self.predict(X_test)
-        
+
         mse = mean_squared_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
-        
+
         self.evaluation_metrics = {
             'mse': mse,
             'r2': r2
         }
-        
+
         return self.evaluation_metrics
-    
+
     def get(self, attribute_name):
         """Helper method to get attributes safely"""
         return getattr(self, attribute_name, None)
-    
+
     @classmethod
     def load(cls, filename):
         with open(filename, 'rb') as f:
@@ -136,7 +129,7 @@ class BasePredictor:
 class LinearRegressionPredictor(BasePredictor):
     def __init__(self, fit_intercept=True, normalize=None, feature_names=None):
         super().__init__(feature_names)
-        
+
         # In scikit-learn 1.0+, normalize parameter was removed
         # Check scikit-learn version
         import sklearn
@@ -155,7 +148,7 @@ class LinearRegressionPredictor(BasePredictor):
             print(f"Error initializing LinearRegression: {e}")
             # Fallback to simplest constructor
             self.model = LinearRegression()
-    
+
     def predict_proba(self, X):
         # Linear regression doesn't have built-in uncertainty estimation
         # Return a simple constant uncertainty value
@@ -170,7 +163,7 @@ class RandomForestPredictor(BasePredictor):
             max_depth=max_depth,
             random_state=random_state
         )
-        
+
     def predict_proba(self, X):
         X_scaled = self.scaler.transform(X)
         predictions = []
@@ -187,7 +180,7 @@ class GradientBoostingPredictor(BasePredictor):
             max_depth=max_depth,
             random_state=random_state
         )
-    
+
     def predict_proba(self, X):
         X_scaled = self.scaler.transform(X)
         # Calculate prediction standard deviation
@@ -223,14 +216,14 @@ os.makedirs(models_dir, exist_ok=True)
 rf_model = RandomForestPredictor()
 rf_model.train(X_train, y_train)
 rf_model.predict(X_test)  # Run once to get performance metrics
-rf_schema_file = rf_model.save_with_schema(os.path.join(models_dir, "rf_temperature_predictor.pkl"), 
+rf_schema_file = rf_model.save_with_schema(os.path.join(models_dir, "rf_temperature_predictor.pkl"),
                                          X_train, y_train, X_test, y_test)
 
 # GradientBoosting model
 gb_model = GradientBoostingPredictor()
 gb_model.train(X_train, y_train)
 gb_model.predict(X_test)  # Run once to get performance metrics
-gb_schema_file = gb_model.save_with_schema(os.path.join(models_dir, "gb_temperature_predictor.pkl"), 
+gb_schema_file = gb_model.save_with_schema(os.path.join(models_dir, "gb_temperature_predictor.pkl"),
                                          X_train, y_train, X_test, y_test)
 
 # Linear Regression model

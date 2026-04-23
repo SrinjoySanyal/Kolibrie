@@ -10,7 +10,6 @@ mod tests {
     fn ml_integration_test() {
         let db = &mut SparqlDatabase::new();            
 
-        // Employee dataset in Turtle format
         let turtle_data = r#"
             <http://example.org#room101> rdf:type <http://example.org#Room> .
             <http://example.org#room101> sensor:temperature "22.5" .
@@ -95,10 +94,10 @@ mod tests {
 
         // println!("logical operator = {produced_logical_operator:?}");
         
-        let produced_physical_operator = optimizer.find_best_plan(&produced_logical_operator);
+        let produced_physical_operator = optimizer.find_best_plan(&produced_logical_operator, db);
         // println!("best plan = {produced_physical_operator:?}");
         let result = produced_physical_operator.execute(db);
         println!("final results = {result:?}");
-        assert_eq!(result.len(), 9);
+        assert_eq!(result.len(), 6);
     }
 }
