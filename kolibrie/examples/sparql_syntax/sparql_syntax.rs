@@ -78,7 +78,7 @@ fn streamertail_optimizer_sparql() {
 
         // Step 5: Initialize the optimizer and find the best physical plan
         let mut optimizer = Streamertail::new(&database);
-        let physical_plan = optimizer.find_best_plan(&logical_plan);
+        let physical_plan = optimizer.find_best_plan(&logical_plan, &database);
 
         println!("Logical Plan: {:?}", logical_plan);
         println!("Optimized Physical Plan: {:?}", physical_plan);

@@ -15,7 +15,10 @@ use std::time::Instant;
 use serde::{Serialize, Deserialize};
 use pyo3::{prelude::*, types::{PyDict, PyList}};
 
-#[derive(Debug, Serialize, Deserialize)]
+pub mod candle_model;
+pub use candle_model::{MlpNeuralPredicate, OutputType};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MLPredictionResult {
     pub predictions: Vec<f64>,
     pub probabilities: Option<Vec<f64>>,
@@ -40,6 +43,7 @@ pub struct ModelPerformanceMetrics {
     pub accuracy: Option<f64>,
     pub r2_score: Option<f64>,
     pub mse: Option<f64>,
+    pub goldilocks_batch: usize
 }
 
 pub struct MLHandler {
@@ -98,6 +102,7 @@ impl MLHandler {
                         "cpu_usage_percent" => metrics.cpu_usage_percent = value,
                         "mse" => metrics.mse = Some(value),
                         "r2" => metrics.r2_score = Some(value),
+                        "goldilocks_batch" => metrics.goldilocks_batch = value as usize,
                         _ => {}
                     }
                 }
@@ -311,7 +316,7 @@ with open(r'{}', 'rb') as f:
 
             // Actual ML prediction
             let prediction_start = Instant::now();
-            let predictions = model.call_method1(py, "predict_with_batching", (py_input.clone(),))?;
+            let predictions = model.call_method1(py, "predict", (py_input.clone(),))?;
             let predictions: Vec<f64> = predictions.extract(py)?;
             let prediction_time = prediction_start.elapsed().as_secs_f64();
             println!("[PYTHON TIMING] Actual prediction completed: {:.6} seconds", prediction_time);

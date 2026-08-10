@@ -212,7 +212,7 @@ impl<'a> CostEstimator<'a> {
                                 }
                             }
                         }
-                        let ml_cardinality = modelids.len(); 
+                        
                         return input_cost + input_cardinality * prediction_time as u64;
                     }
                 }

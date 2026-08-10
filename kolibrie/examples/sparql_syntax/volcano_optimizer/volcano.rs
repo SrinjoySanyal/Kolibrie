@@ -71,7 +71,7 @@ fn simple_streamertail_optimizer() {
 
     // Step 3: Initialize the optimizer and optimize
     let mut optimizer = Streamertail::new(&database);
-    let best_plan = optimizer.find_best_plan(&logical_plan);
+    let best_plan = optimizer.find_best_plan(&logical_plan, &database);
 
     println!("Logical Plan: {:?}", logical_plan);
     println!("Optimized Physical Plan: {:?}", best_plan);
@@ -157,7 +157,7 @@ fn streamertail_optimizer_multiple_triples() {
 
     // Step 4: Initialize the optimizer and optimize
     let mut optimizer = Streamertail::new(&database);
-    let best_plan = optimizer.find_best_plan(&logical_plan);
+    let best_plan = optimizer.find_best_plan(&logical_plan, &database);
 
     println!("Logical Plan: {:?}", logical_plan);
     println!("Optimized Physical Plan: {:?}", best_plan);
@@ -223,7 +223,7 @@ fn streamertail_optimizer_rdf() {
 
     // Step 4: Initialize the optimizer and optimize
     let mut optimizer = Streamertail::new(&database);
-    let best_plan = optimizer.find_best_plan(&logical_plan);
+    let best_plan = optimizer.find_best_plan(&logical_plan, &database);
 
     println!("Logical Plan: {:?}", logical_plan);
     println!("Optimized Physical Plan: {:?}", best_plan);
@@ -340,7 +340,7 @@ fn streamertail_optimizer_index_patterns() {
     for (i, (description, pattern)) in patterns.iter().enumerate() {
         let logical_plan = LogicalOperator::scan(pattern.clone());
         let mut optimizer = Streamertail::new(&database);
-        let best_plan = optimizer.find_best_plan(&logical_plan);
+        let best_plan = optimizer.find_best_plan(&logical_plan, &database);
 
         println!("\n=== QUERY {} - {} ===", i + 1, description);
         println!("Pattern: {:?}", pattern);
@@ -419,7 +419,7 @@ fn streamertail_optimizer_performance_test() {
 
     let start = Instant::now();
     let mut optimizer1 = Streamertail::new(&database);
-    let physical_plan1 = optimizer1.find_best_plan(&logical_plan1);
+    let physical_plan1 = optimizer1.find_best_plan(&logical_plan1, &database);
     let optimization_time1 = start.elapsed();
 
     let start = Instant::now();
@@ -448,7 +448,7 @@ fn streamertail_optimizer_performance_test() {
 
     let start = Instant::now();
     let mut optimizer2 = Streamertail::new(&database);
-    let physical_plan2 = optimizer2.find_best_plan(&logical_plan2);
+    let physical_plan2 = optimizer2.find_best_plan(&logical_plan2, &database);
     let optimization_time2 = start.elapsed();
 
     let start = Instant::now();
@@ -478,7 +478,7 @@ fn streamertail_optimizer_performance_test() {
 
     let start = Instant::now();
     let mut optimizer3 = Streamertail::new(&database);
-    let physical_plan3 = optimizer3.find_best_plan(&logical_plan3);
+    let physical_plan3 = optimizer3.find_best_plan(&logical_plan3, &database);
     let optimization_time3 = start.elapsed();
 
     let start = Instant::now();

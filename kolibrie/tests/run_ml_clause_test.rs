@@ -11,6 +11,10 @@ mod tests {
         let db = &mut SparqlDatabase::new();            
 
         let turtle_data = r#"
+            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+            @prefix sensor: <https://factory.com#> .
+            @prefix mls: <http://www.w3.org/ns/mls#> .
+            @prefix ext: <http://www.thesisextension.org/runml#> .
             <http://example.org#room101> rdf:type <http://example.org#Room> .
             <http://example.org#room101> sensor:temperature "22.5" .
             <http://example.org#room101> sensor:humidity "45.0" .
@@ -27,20 +31,25 @@ mod tests {
             <http://example.org#room103> sensor:occupancy "3" .
 
             <http://example.org#roomML> rdf:type mls:Run .
-            <http://example.org#roomML> mls:hasOutput rf_temperature_predictor .
-            rf_temperature_predictor rdf:type mls:Model . 
+            <http://example.org#roomML> mls:hasOutput ext:rf_temperature_predictor .
+            ext:rf_temperature_predictor rdf:type mls:Model . 
+            ext:rf_temperature_predictor ext:hasModelName "rf_temperature_predictor" .
 
             <http://example.org#roomML2> rdf:type mls:Run .
-            <http://example.org#roomML2> mls:hasOutput gb_temperature_predictor .
-            gb_temperature_predictor rdf:type mls:Model .
+            <http://example.org#roomML2> mls:hasOutput ext:gb_temperature_predictor .
+            ext:gb_temperature_predictor rdf:type mls:Model . 
+            ext:gb_temperature_predictor ext:hasModelName "gb_temperature_predictor" .
 
             <http://example.org#roomML> sensor:connectsTo sensor:alarm.
         "#;
         db.parse_turtle(turtle_data);
         let optimizer = &mut Streamertail::new(&db);
 
-        let sparql = r#"
-        SELECT ?building ?prediction WHERE {
+        let sparql = r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+        PREFIX mls: <http://www.w3.org/ns/mls#>
+        PREFIX ext: <http://www.thesisextension.org/runml#>
+        PREFIX sensor: <https://factory.com#>
+        SELECT ?building ?modelname ?prediction ?temp ?humidity ?occupancy WHERE {
             ?building sensor:temperature ?temp.
             ?building sensor:humidity ?humidity.
             RUN {?temp, ?humidity, ?occupancy} ON ?r TO ?prediction.
@@ -96,7 +105,7 @@ mod tests {
         
         let produced_physical_operator = optimizer.find_best_plan(&produced_logical_operator, db);
         // println!("best plan = {produced_physical_operator:?}");
-        let result = produced_physical_operator.execute(db);
+        let result = produced_physical_operator.execute_with_ids(db);
         println!("final results = {result:?}");
         assert_eq!(result.len(), 6);
     }

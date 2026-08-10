@@ -116,6 +116,67 @@ pub struct MLPredictClause<'a> {
     pub output: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossFn {
+    CrossEntropy,
+    Nll,
+    Mse,
+    BinaryCrossEntropy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizerKind {
+    Adam,
+    Sgd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelArch {
+    Mlp { hidden_layers: Vec<usize> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeuralOutputKind {
+    Exclusive { labels: Vec<String> },
+    Binary { positive_literal: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDecl {
+    pub name: String,
+    pub arch: ModelArch,
+    pub output_kind: NeuralOutputKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeuralRelationDecl {
+    pub predicate: String,
+    pub model_name: String,
+    pub input_patterns: Vec<(String, String, String)>,
+    pub feature_vars: Vec<String>,
+    pub anchor_var: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingDataSource {
+    GraphPattern(Vec<(String, String, String)>),
+    Query(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainNeuralRelationDecl {
+    pub predicate: String,
+    pub data_source: TrainingDataSource,
+    pub label_var: String,
+    pub target_triple: (String, String, String),
+    pub loss: LossFn,
+    pub optimizer: OptimizerKind,
+    pub learning_rate: f64,
+    pub epochs: usize,
+    pub batch_size: usize,
+    pub save_path: Option<String>,
+}
+
 // Add new structs for windowing support
 #[derive(Clone, Debug)]
 pub struct WindowClause<'a> {
@@ -214,6 +275,9 @@ pub struct CombinedRule<'a> {
     pub head: RuleHead<'a>,
     pub stream_type: Option<StreamType<'a>>,
     pub window_clause: Vec<WindowClause<'a>>,
+    pub model_decls: Vec<ModelDecl>,
+    pub neural_relation_decls: Vec<NeuralRelationDecl>,
+    pub train_neural_relation_decls: Vec<TrainNeuralRelationDecl>,
     pub body: (
         Vec<(&'a str, &'a str, &'a str)>, // triple patterns from WHERE
         Vec<FilterExpression<'a>>, // filters
@@ -221,6 +285,8 @@ pub struct CombinedRule<'a> {
         Vec<(&'a str, Vec<&'a str>, &'a str)>, // BIND clauses
         Vec<SubQuery<'a>>,                     // subqueries
     ),
+    /// Negated body atoms parsed from `NOT triple_pattern` clauses in WHERE.
+    pub negated_body: Vec<(&'a str, &'a str, &'a str)>,
     pub conclusion: Vec<(&'a str, &'a str, &'a str)>,
     pub ml_predict: Option<MLPredictClause<'a>>, // new field for ML.PREDICT clause
     pub prob_annotation: Option<ProbAnnotation<'a>>, // probabilistic rule annotation
@@ -261,24 +327,31 @@ pub struct OrderCondition<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct SparqlObject<'a>{
+    pub insert_clause: Option<InsertClause<'a>>,
+    pub variables: Vec<(&'a str, &'a str, Option<&'a str>)>,
+    pub patterns: Vec<(&'a str, &'a str, &'a str)>,
+    pub filters: Vec<FilterExpression<'a>>,
+    pub group_vars: Vec<&'a str>,
+    pub parsed_prefixes: HashMap<String, String>,
+    pub values: Option<ValuesClause<'a>>,
+    pub binds: Vec<(&'a str, Vec<&'a str>, &'a str)>,
+    pub subqueries: Vec<SubQuery<'a>>,
+    pub limit: Option<usize>,
+    pub window: Vec<WindowBlock<'a>>,
+    pub order_conditions: Vec<OrderCondition<'a>>,
+    pub run_ml_clause: Option<MLClause<'a>>
+}
+
+#[derive(Debug, Clone)]
 pub struct CombinedQuery<'a> {
     pub prefixes: HashMap<String, String>,
     pub retrieve_clause: Option<RetrieveClause<'a>>,
     pub register_clause: Option<RegisterClause<'a>>,
+    pub model_decls: Vec<ModelDecl>,
+    pub neural_relation_decls: Vec<NeuralRelationDecl>,
+    pub train_neural_relation_decls: Vec<TrainNeuralRelationDecl>,
     pub rule: Option<CombinedRule<'a>>,
-    pub sparql: (
-        Option<InsertClause<'a>>,
-        Vec<(&'a str, &'a str, Option<&'a str>)>,
-        Vec<(&'a str, &'a str, &'a str)>,
-        Vec<FilterExpression<'a>>,
-        Vec<&'a str>,
-        HashMap<String, String>,
-        Option<ValuesClause<'a>>,
-        Vec<(&'a str, Vec<&'a str>, &'a str)>,
-        Vec<SubQuery<'a>>,
-        Option<usize>,
-        Vec<WindowBlock<'a>>,
-        Vec<OrderCondition<'a>>,
-    ),
+    pub sparql: SparqlObject<'a>,
     pub delete_clause: Option<DeleteClause<'a>>,
 }

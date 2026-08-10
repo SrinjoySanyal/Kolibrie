@@ -133,7 +133,7 @@ fn simple_scan_example(database: &mut SparqlDatabase) {
     // Create optimizer and find best plan
     let start = Instant::now();
     let mut optimizer = Streamertail::new(database);
-    let physical_plan = optimizer.find_best_plan(&logical_plan);
+    let physical_plan = optimizer.find_best_plan(&logical_plan, &database);
     let optimization_time = start.elapsed();
 
     println!("Optimization completed in {:?}", optimization_time);
@@ -178,7 +178,7 @@ fn join_example(database: &mut SparqlDatabase) {
     // Create optimizer and find best plan
     let start = Instant::now();
     let mut optimizer = Streamertail::new(database);
-    let physical_plan = optimizer.find_best_plan(&logical_plan);
+    let physical_plan = optimizer.find_best_plan(&logical_plan, &database);
     let optimization_time = start.elapsed();
 
     println!("Optimization completed in {:?}", optimization_time);
@@ -217,7 +217,7 @@ fn filter_example(database: &mut SparqlDatabase) {
     // Create optimizer and find best plan
     let start = Instant::now();
     let mut optimizer = Streamertail::new(database);
-    let physical_plan = optimizer.find_best_plan(&logical_plan);
+    let physical_plan = optimizer.find_best_plan(&logical_plan, &database);
     let optimization_time = start.elapsed();
 
     println!("Optimization completed in {:?}", optimization_time);

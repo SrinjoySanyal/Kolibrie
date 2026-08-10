@@ -1,0 +1,131 @@
+@prefix ex: <http://example.org/> .
+@prefix mls: <http://www.w3.org/ns/mls#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:run1 a mls:Run ;
+    mls:achieves ex:task1 ;
+    mls:executes ex:implementation1 ;
+    mls:hasInput <http://example.org/data/testing>,
+        <http://example.org/data/training> ;
+    mls:hasOutput ex:modelEvaluation1,
+        ex:modelEvaluation2,
+        ex:modelEvaluation3,
+        ex:modelEvaluation4,
+        ex:modelEvaluation5,
+        ex:modelEvaluation6,
+        <http://example.org/models/rf_temperature_predictor.pkl> ;
+    mls:hasQuality [ a mls:Quality ;
+            rdfs:label "CPU Time Used" ;
+            mls:hasValue 0.09360313415527344 ] ;
+    mls:realizes <http://example.org/algorithm/RandomForestPredictor> .
+
+<http://example.org/software/__main__> a mls:Software ;
+    mls:hasPart ex:implementation1 .
+
+<http://example.org/data/testing> a mls:Dataset ;
+    mls:hasQuality [ a mls:DatasetCharacteristic ;
+            rdfs:label "Number of Features" ;
+            mls:hasValue 3 ],
+        [ a mls:DatasetCharacteristic ;
+            rdfs:label "Data Format" ;
+            mls:hasValue "<class 'numpy.ndarray'>" ],
+        [ a mls:DatasetCharacteristic ;
+            rdfs:label "Data Size in Bytes" ;
+            mls:hasValue 4800 ],
+        [ a mls:DatasetCharacteristic ;
+            rdfs:label "Number of Instances" ;
+            mls:hasValue 200 ] .
+
+ex:evalspec1 a mls:EvaluationSpecification ;
+    mls:defines ex:task1 ;
+    mls:hasPart ex:cpu_usage_percent,
+        ex:memory_usage_mb,
+        ex:mse,
+        ex:prediction_time,
+        ex:r2,
+        ex:training_time .
+
+ex:modelEvaluation1 a owl:NamedIndividual,
+        mls:ModelEvaluation ;
+    mls:hasValue 1.005885e+00 ;
+    mls:specifiedBy ex:mse .
+
+ex:modelEvaluation2 a owl:NamedIndividual,
+        mls:ModelEvaluation ;
+    mls:hasValue 9.222967e-01 ;
+    mls:specifiedBy ex:r2 .
+
+ex:modelEvaluation3 a owl:NamedIndividual,
+        mls:ModelEvaluation ;
+    mls:hasValue 9.360313e-02 ;
+    mls:specifiedBy ex:training_time .
+
+ex:modelEvaluation4 a owl:NamedIndividual,
+        mls:ModelEvaluation ;
+    mls:hasValue 2.738714e-03 ;
+    mls:specifiedBy ex:prediction_time .
+
+ex:modelEvaluation5 a owl:NamedIndividual,
+        mls:ModelEvaluation ;
+    mls:hasValue 7.607461e+02 ;
+    mls:specifiedBy ex:memory_usage_mb .
+
+ex:modelEvaluation6 a owl:NamedIndividual,
+        mls:ModelEvaluation ;
+    mls:hasValue 0e+00 ;
+    mls:specifiedBy ex:cpu_usage_percent .
+
+<http://example.org/models/rf_temperature_predictor.pkl> a mls:Model ;
+    mls:hasQuality [ a mls:ModelCharacteristic ;
+            rdfs:label "Generic Model" ;
+            mls:hasValue "No specific characteristics extracted" ] .
+
+<http://example.org/algorithm/RandomForestPredictor> a mls:Algorithm .
+
+ex:cpu_usage_percent a owl:NamedIndividual,
+        mls:EvaluationMeasure ;
+    rdfs:label "cpu_usage_percent" .
+
+<http://example.org/data/training> a mls:Dataset ;
+    mls:hasQuality [ a mls:DatasetCharacteristic ;
+            rdfs:label "Number of Instances" ;
+            mls:hasValue 800 ],
+        [ a mls:DatasetCharacteristic ;
+            rdfs:label "Data Size in Bytes" ;
+            mls:hasValue 19200 ],
+        [ a mls:DatasetCharacteristic ;
+            rdfs:label "Data Format" ;
+            mls:hasValue "<class 'numpy.ndarray'>" ],
+        [ a mls:DatasetCharacteristic ;
+            rdfs:label "Number of Features" ;
+            mls:hasValue 3 ] .
+
+ex:implementation1 a mls:Implementation ;
+    mls:implements <http://example.org/algorithm/RandomForestPredictor> .
+
+ex:memory_usage_mb a owl:NamedIndividual,
+        mls:EvaluationMeasure ;
+    rdfs:label "memory_usage_mb" .
+
+ex:mse a owl:NamedIndividual,
+        mls:EvaluationMeasure ;
+    rdfs:label "mse" .
+
+ex:prediction_time a owl:NamedIndividual,
+        mls:EvaluationMeasure ;
+    rdfs:label "prediction_time" .
+
+ex:r2 a owl:NamedIndividual,
+        mls:EvaluationMeasure ;
+    rdfs:label "r2" .
+
+ex:task1 a mls:Task ;
+    mls:definedOn <http://example.org/data/training>,
+        ex:evalspec1 .
+
+ex:training_time a owl:NamedIndividual,
+        mls:EvaluationMeasure ;
+    rdfs:label "training_time" .
+

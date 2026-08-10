@@ -111,7 +111,7 @@ RULE :TemperatureAlert :-
                     let logical_plan = build_ml_predict_logical_plan(ml_predict, &mut database)?;
                     
                     let mut optimizer = Streamertail::new(&database);
-                    let physical_plan = optimizer.find_best_plan(&logical_plan);
+                    let physical_plan = optimizer.find_best_plan(&logical_plan, &database);
                     
                     println!("Physical plan optimized.");
                     

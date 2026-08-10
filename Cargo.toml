@@ -29,6 +29,8 @@ httparse = "1.9.4"
 crossbeam = "0.8.4"
 pyo3 = { version = "0.25.1", features = ["extension-module", "auto-initialize", "abi3-py310"] }
 clap = { version = "4.5.45", features = ["derive"] }
+csv = "1"
+polars = {version = "0.53.0", features = ["lazy", "csv", "dtype-u128"]}
 
 [profile.bench]
 debug = true

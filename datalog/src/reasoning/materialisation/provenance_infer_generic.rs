@@ -9,45 +9,63 @@
  */
 
 use shared::dictionary::Dictionary;
-use shared::probabilistic_rule::ProbabilisticRule;
-use shared::probability_store::ProbabilityStore;
+use shared::provenance::Provenance;
+use shared::rule::Rule;
+use shared::tag_store::TagStore;
 use shared::triple::Triple;
 use std::collections::HashSet;
 use crate::reasoning::Reasoner;
 
-/// Result of a single probabilistic inference round.
-pub struct ProbInferResult {
+/// Result of a single provenance inference round.
+pub struct ProvenanceInferResult {
     /// Newly derived triples (not previously in known_facts).
     pub new_facts: HashSet<Triple>,
-    /// Whether any existing triple's probability was updated this round.
-    pub probability_changed: bool,
+    /// Whether any existing triple's tag was updated this round.
+    pub tag_changed: bool,
 }
 
-/// Strategy trait for probabilistic materialisation.
+/// Strategy trait for provenance-based materialisation.
 ///
-/// Similar to `InferenceStrategy` but additionally receives and updates a
-/// `ProbabilityStore`, and signals whether probabilities changed (needed
-/// for fixpoint detection with monotone convergence).
-pub trait ProbabilisticInferenceStrategy {
+/// Implementors define how a single inference round works (e.g. naive, semi-naive).
+/// The driver loop calls `infer_round` repeatedly until fixpoint.
+pub trait ProvenanceInferenceStrategy<P: Provenance> {
     fn infer_round(
         &mut self,
         dictionary: &mut Dictionary,
-        rules: &[ProbabilisticRule],
+        rules: &[Rule],
         all_facts: &[Triple],
         known_facts: &HashSet<Triple>,
-        prob_store: &mut ProbabilityStore,
-    ) -> ProbInferResult;
+        tag_store: &mut TagStore<P>,
+    ) -> ProvenanceInferResult;
 }
 
 impl Reasoner {
-    /// Generic driver for probabilistic materialisation.
-    ///
-    /// Loops until no new facts are derived AND no probability changed
-    /// (fixpoint with monotone convergence).
-    pub fn infer_with_probabilistic_strategy<S: ProbabilisticInferenceStrategy>(
+    /// Generic driver for provenance-based materialisation. Loops until fixpoint.
+    pub fn infer_with_provenance_strategy<P, S>(
+        &mut self,
+        strat: S,
+        tag_store: &mut TagStore<P>,
+    ) -> Vec<Triple>
+    where
+        P: Provenance,
+        S: ProvenanceInferenceStrategy<P>,
+    {
+        let rules: Vec<Rule> = self.rules.clone();
+        self.infer_with_provenance_strategy_and_rules(strat, tag_store, &rules)
+    }
+
+    /// Same as `infer_with_provenance_strategy` but with an explicit rule slice.
+    /// Used for stratified evaluation where stratum-0 uses only positive rules.
+    pub fn infer_with_provenance_strategy_and_rules<P, S>(
         &mut self,
         mut strat: S,
-    ) -> Vec<Triple> {
+        tag_store: &mut TagStore<P>,
+        rules: &[Rule],
+    ) -> Vec<Triple>
+    where
+        P: Provenance,
+        S: ProvenanceInferenceStrategy<P>,
+    {
         let mut all_facts: Vec<Triple> = self.index_manager.query(None, None, None);
         let mut known_facts: HashSet<Triple> = all_facts.iter().cloned().collect();
         let idx_before_inference = all_facts.len();
@@ -56,10 +74,10 @@ impl Reasoner {
             let mut dict = self.dictionary.write().unwrap();
             let result = strat.infer_round(
                 &mut dict,
-                &self.probabilistic_rules,
+                rules,
                 &all_facts,
                 &known_facts,
-                &mut self.probability_store,
+                tag_store,
             );
             drop(dict);
 
@@ -73,8 +91,8 @@ impl Reasoner {
                 }
             }
 
-            // Terminate when no new facts AND no probability updates
-            if !has_new_facts && !result.probability_changed {
+            // Terminate when no new facts AND no tag updates
+            if !has_new_facts && !result.tag_changed {
                 break;
             }
         }

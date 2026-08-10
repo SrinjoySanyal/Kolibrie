@@ -19,6 +19,10 @@ use nom::{
     Parser
 };
 use rayon::str;
+use crate::neural_relations::{
+    execute_train_decl, materialize_neural_relations_for_patterns,
+    register_neural_declarations,
+};
 use crate::sparql_database::SparqlDatabase;
 use datalog::reasoning::Reasoner;
 use shared::triple::Triple;
@@ -603,7 +607,7 @@ pub fn parse_filter(input: &str) -> IResult<&str, FilterExpression<'_>> {
     Ok((input, expr))
 }
 
-pub fn parse_ml_clause(input: &str) -> IResult<&str, MLClause<'_>> {
+pub fn parse_run_ml_clause(input: &str) -> IResult<&str, MLClause<'_>> {
     let (input, _) = tag("RUN").parse(input)?;
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = char('{').parse(input)?;
@@ -662,7 +666,7 @@ pub fn parse_subquery<'a>(input: &'a str) -> IResult<&'a str, SubQuery<'a>> {
     let (input, variables) = parse_select(input)?;
 
     // Parse WHERE clause (recursive)
-    let (input, (patterns, filters, values_clause, binds, _, _, ml_clause_block)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, _, _, _, ml_clause_block)) = parse_where(input)?;
 
     let (input, limit) = opt(preceded(multispace0, parse_limit)).parse(input)?;
 
@@ -717,6 +721,15 @@ pub fn parse_window_block(input: &str) -> IResult<&str, WindowBlock<'_>> {
     }))
 }
 
+/// Parse `NOT triple_block` — negation-as-failure body atom.
+/// Returns the list of negated triple patterns.
+fn parse_not_triple_block(input: &str) -> IResult<&str, Vec<(&str, &str, &str)>> {
+    let (input, _) = multispace0.parse(input)?;
+    let (input, _) = tag("NOT").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    parse_triple_block(input)
+}
+
 pub fn parse_where(
     input: &str,
 ) -> IResult<
@@ -728,6 +741,7 @@ pub fn parse_where(
         Vec<(&str, Vec<&str>, &str)>,
         Vec<SubQuery<'_>>,
         Vec<WindowBlock<'_>>,
+        Vec<(&str, &str, &str)>,  // negated triple patterns (NOT X)
         Option<MLClause<'_>>
     ),
 > {
@@ -738,6 +752,7 @@ pub fn parse_where(
     let (input, _) = multispace0.parse(input)?;
 
     let mut patterns = Vec::new();
+    let mut neg_patterns = Vec::new();
     let mut filters = Vec::new();
     let mut binds = Vec::new();
     let mut subqueries = Vec::new();
@@ -761,6 +776,9 @@ pub fn parse_where(
         current_input = if let Ok((new_input, window_block)) = parse_window_block(current_input) {
             window_blocks.push(window_block);
             new_input
+        } else if let Ok((new_input, not_triples)) = parse_not_triple_block(current_input) {
+            neg_patterns.extend(not_triples);
+            new_input
         } else if let Ok((new_input, triple_block)) = parse_triple_block(current_input) {
             patterns.extend(triple_block);
             new_input
@@ -776,7 +794,7 @@ pub fn parse_where(
         } else if let Ok((new_input, vals)) = parse_values(current_input) {
             values_clause = Some(vals);
             new_input
-        } else if let Ok((new_input, mlclause)) = parse_ml_clause(current_input) {
+        } else if let Ok((new_input, mlclause)) = parse_run_ml_clause(current_input) {
             ml_clause_params = Some(mlclause);
             new_input
         } else {
@@ -799,7 +817,7 @@ pub fn parse_where(
 
     Ok((
         current_input,
-        (patterns, filters, values_clause, binds, subqueries, window_blocks, ml_clause_params),
+        (patterns, filters, values_clause, binds, subqueries, window_blocks, neg_patterns, ml_clause_params),
     ))
 }
 
@@ -830,7 +848,7 @@ pub fn parse_register_clause(input: &str) -> IResult<&str, RegisterClause<'_>> {
     let (input, _) = multispace0.parse(input)?;
     
     // Parse WHERE clause with window support
-    let (input, (patterns, filters, values_clause, binds, subqueries, window_blocks, ml_predict_clause)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, subqueries, window_blocks, _, ml_predict_clause)) = parse_where(input)?;
     
     Ok((input, RegisterClause {
         stream_type,
@@ -1099,7 +1117,7 @@ pub fn parse_sparql_query(
     let (input, _) = multispace0.parse(input)?;
 
     // Parse WHERE clause
-    let (input, (patterns, filters, values_clause, binds, subqueries, window_block, parse_sparql_block)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, subqueries, window_block, _, ml_run_clause)) = parse_where(input)?;
 
     // Optionally parse the GROUP BY clause
     let (input, group_vars) =
@@ -1130,7 +1148,7 @@ pub fn parse_sparql_query(
             limit,
             window_block,
             order_conditions,
-            parse_sparql_block
+            ml_run_clause
         ),
     ))
 }
@@ -1223,6 +1241,424 @@ fn parse_balanced(input: &str) -> IResult<&str, &str> {
     )))
 }
 
+fn split_top_level(input: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut brace_depth = 0i32;
+    let mut paren_depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            _ if ch == delimiter && brace_depth == 0 && paren_depth == 0 => {
+                parts.push(input[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = input[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    parts
+}
+
+fn extract_wrapped_block<'a>(input: &'a str, open: char, close: char) -> Option<(&'a str, &'a str)> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with(open) {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in trimmed.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            _ if ch == open => depth += 1,
+            _ if ch == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&trimmed[idx + 1..], &trimmed[1..idx]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_quoted_value(input: &str) -> Option<&str> {
+    let trimmed = input.trim();
+    let rest = trimmed.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+fn parse_loss_fn(value: &str) -> Option<LossFn> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cross_entropy" => Some(LossFn::CrossEntropy),
+        "nll" => Some(LossFn::Nll),
+        "mse" => Some(LossFn::Mse),
+        "binary_cross_entropy" | "bce" => Some(LossFn::BinaryCrossEntropy),
+        _ => None,
+    }
+}
+
+fn parse_optimizer_kind(value: &str) -> Option<OptimizerKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "adam" => Some(OptimizerKind::Adam),
+        "sgd" => Some(OptimizerKind::Sgd),
+        _ => None,
+    }
+}
+
+fn into_owned_triple(triple: (&str, &str, &str)) -> (String, String, String) {
+    (triple.0.to_string(), triple.1.to_string(), triple.2.to_string())
+}
+
+fn parse_graph_pattern_block_owned(input: &str) -> Result<Vec<(String, String, String)>, String> {
+    let wrapped = format!("WHERE {{ {} }}", input.trim());
+    let (_, (patterns, _, _, _, _, _, _, _)) = parse_where(&wrapped)
+        .map_err(|err| format!("invalid graph-pattern block: {err:?}"))?;
+    Ok(patterns.into_iter().map(into_owned_triple).collect())
+}
+
+fn parse_usize_list(input: &str) -> Result<Vec<usize>, String> {
+    split_top_level(input, ',')
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| {
+            part.trim()
+                .parse::<usize>()
+                .map_err(|_| format!("invalid usize value `{}`", part.trim()))
+        })
+        .collect()
+}
+
+fn parse_output_values(input: &str) -> Vec<String> {
+    split_top_level(input, ',')
+        .into_iter()
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(
+                    parse_quoted_value(trimmed)
+                        .unwrap_or(trimmed)
+                        .trim()
+                        .to_string(),
+                )
+            }
+        })
+        .collect()
+}
+
+fn infer_anchor_var(patterns: &[(String, String, String)]) -> Result<String, String> {
+    if let Some(subject_var) = patterns.iter().find_map(|(s, _, _)| {
+        if s.starts_with('?') {
+            Some(s.clone())
+        } else {
+            None
+        }
+    }) {
+        return Ok(subject_var);
+    }
+
+    for (s, p, o) in patterns {
+        for term in [s, p, o] {
+            if term.starts_with('?') {
+                return Ok(term.clone());
+            }
+        }
+    }
+
+    Err("NEURAL RELATION INPUT must contain at least one anchor variable".to_string())
+}
+
+pub fn parse_model_decl(input: &str) -> IResult<&str, ModelDecl> {
+    let (input, _) = multispace0.parse(input)?;
+    let (input, _) = tag("MODEL").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = char('"').parse(input)?;
+    let (input, model_name) = take_until("\"").parse(input)?;
+    let (input, _) = char('"').parse(input)?;
+    let (input, _) = multispace0.parse(input)?;
+    let (input, body) = preceded(char('{'), parse_balanced).parse(input)?;
+
+    let body = body.trim();
+    let arch_tail = body
+        .strip_prefix("ARCH")
+        .map(str::trim)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let arch_tail = arch_tail
+        .strip_prefix("MLP")
+        .map(str::trim)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let (after_arch, arch_body) = extract_wrapped_block(arch_tail, '{', '}')
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let hidden_body = arch_body
+        .trim()
+        .strip_prefix("HIDDEN")
+        .map(str::trim)
+        .and_then(|rest| extract_wrapped_block(rest, '[', ']').map(|(_, hidden)| hidden))
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let hidden_layers = parse_usize_list(hidden_body)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(hidden_body, nom::error::ErrorKind::Tag)))?;
+
+    let output_tail = after_arch
+        .trim()
+        .strip_prefix("OUTPUT")
+        .map(str::trim)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let output_kind = if let Some(rest) = output_tail.strip_prefix("EXCLUSIVE") {
+        let (_, labels_body) = extract_wrapped_block(rest.trim(), '{', '}')
+            .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+        NeuralOutputKind::Exclusive {
+            labels: parse_output_values(labels_body),
+        }
+    } else if let Some(rest) = output_tail.strip_prefix("BINARY") {
+        let (_, labels_body) = extract_wrapped_block(rest.trim(), '{', '}')
+            .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+        let mut values = parse_output_values(labels_body);
+        let positive_literal = values
+            .drain(..)
+            .next()
+            .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+        NeuralOutputKind::Binary { positive_literal }
+    } else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            body,
+            nom::error::ErrorKind::Tag,
+        )));
+    };
+
+    Ok((
+        input,
+        ModelDecl {
+            name: model_name.to_string(),
+            arch: ModelArch::Mlp { hidden_layers },
+            output_kind,
+        },
+    ))
+}
+
+pub fn parse_neural_relation_decl(input: &str) -> IResult<&str, NeuralRelationDecl> {
+    let (input, _) = multispace0.parse(input)?;
+    let (input, _) = tag("NEURAL").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("RELATION").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, predicate_name) = predicate(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("USING").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("MODEL").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = char('"').parse(input)?;
+    let (input, model_name) = take_until("\"").parse(input)?;
+    let (input, _) = char('"').parse(input)?;
+    let (input, _) = multispace0.parse(input)?;
+    let (input, body) = preceded(char('{'), parse_balanced).parse(input)?;
+
+    let trimmed = body.trim();
+    let input_tail = trimmed
+        .strip_prefix("INPUT")
+        .map(str::trim)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let (after_input, input_block) = extract_wrapped_block(input_tail, '{', '}')
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let input_patterns = parse_graph_pattern_block_owned(input_block)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let features_tail = after_input
+        .trim()
+        .strip_prefix("FEATURES")
+        .map(str::trim)
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let (_, features_block) = extract_wrapped_block(features_tail, '{', '}')
+        .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+    let feature_vars = split_top_level(features_block, ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    let anchor_var = infer_anchor_var(&input_patterns)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+
+    Ok((
+        input,
+        NeuralRelationDecl {
+            predicate: predicate_name.to_string(),
+            model_name: model_name.to_string(),
+            input_patterns,
+            feature_vars,
+            anchor_var,
+        },
+    ))
+}
+
+fn parse_top_level_neural_decls(
+    mut input: &str,
+) -> IResult<&str, (Vec<ModelDecl>, Vec<NeuralRelationDecl>, Vec<TrainNeuralRelationDecl>)> {
+    let mut model_decls = Vec::new();
+    let mut neural_relation_decls = Vec::new();
+    let mut train_neural_relation_decls = Vec::new();
+
+    loop {
+        let (after_ws, _) = multispace0.parse(input)?;
+        input = after_ws;
+        if input.starts_with("MODEL") {
+            let (new_input, decl) = parse_model_decl(input)?;
+            model_decls.push(decl);
+            input = new_input;
+        } else if input.starts_with("NEURAL RELATION") {
+            let (new_input, decl) = parse_neural_relation_decl(input)?;
+            neural_relation_decls.push(decl);
+            input = new_input;
+        } else if input.starts_with("TRAIN NEURAL RELATION") {
+            let (new_input, decl) = parse_train_neural_relation_decl(input)?;
+            train_neural_relation_decls.push(decl);
+            input = new_input;
+        } else {
+            break;
+        }
+    }
+
+    Ok((input, (model_decls, neural_relation_decls, train_neural_relation_decls)))
+}
+
+pub fn parse_train_neural_relation_decl(input: &str) -> IResult<&str, TrainNeuralRelationDecl> {
+    let (input, _) = multispace0.parse(input)?;
+    let (input, _) = tag("TRAIN").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("NEURAL").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, _) = tag("RELATION").parse(input)?;
+    let (input, _) = multispace1.parse(input)?;
+    let (input, predicate_name) = predicate(input)?;
+    let (input, _) = multispace0.parse(input)?;
+    let (input, body) = preceded(char('{'), parse_balanced).parse(input)?;
+
+    let trimmed = body.trim();
+    let (rest, data_source) = if let Some(data_tail) = trimmed.strip_prefix("DATA") {
+        let (after_data, data_body) = extract_wrapped_block(data_tail.trim(), '{', '}')
+            .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+        let parsed = parse_graph_pattern_block_owned(data_body)
+            .map_err(|_| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+        (after_data.trim(), TrainingDataSource::GraphPattern(parsed))
+    } else if let Some(query_tail) = trimmed.strip_prefix("QUERY") {
+        let (after_query, query_body) = extract_wrapped_block(query_tail.trim(), '{', '}')
+            .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+        (after_query.trim(), TrainingDataSource::Query(query_body.trim().to_string()))
+    } else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            body,
+            nom::error::ErrorKind::Tag,
+        )));
+    };
+
+    let mut label_var = None;
+    let mut target_triple = None;
+    let mut loss = None;
+    let mut optimizer = None;
+    let mut learning_rate = None;
+    let mut epochs = None;
+    let mut batch_size = None;
+    let mut save_path = None;
+
+    for line in rest.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(value) = line.strip_prefix("LABEL") {
+            label_var = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("TARGET") {
+            let (_, block) = extract_wrapped_block(value.trim(), '{', '}')
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+            let triple = parse_single_triple_template(block.trim())
+                .map_err(|_| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?;
+            target_triple = Some(into_owned_triple(triple));
+        } else if let Some(value) = line.strip_prefix("LOSS") {
+            loss = parse_loss_fn(value.trim());
+        } else if let Some(value) = line.strip_prefix("OPTIMIZER") {
+            optimizer = parse_optimizer_kind(value.trim());
+        } else if let Some(value) = line.strip_prefix("LEARNING_RATE") {
+            learning_rate = value.trim().parse::<f64>().ok();
+        } else if let Some(value) = line.strip_prefix("EPOCHS") {
+            epochs = value.trim().parse::<usize>().ok();
+        } else if let Some(value) = line.strip_prefix("BATCH_SIZE") {
+            batch_size = value.trim().parse::<usize>().ok();
+        } else if let Some(value) = line.strip_prefix("SAVE_TO") {
+            save_path = parse_quoted_value(value.trim()).map(str::to_string);
+        }
+    }
+
+    Ok((
+        input,
+        TrainNeuralRelationDecl {
+            predicate: predicate_name.to_string(),
+            data_source,
+            label_var: label_var
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            target_triple: target_triple
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            loss: loss
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            optimizer: optimizer
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            learning_rate: learning_rate
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            epochs: epochs
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            batch_size: batch_size
+                .ok_or_else(|| nom::Err::Error(nom::error::Error::new(body, nom::error::ErrorKind::Tag)))?,
+            save_path,
+        },
+    ))
+}
+
+fn parse_single_triple_template(input: &str) -> Result<(&str, &str, &str), String> {
+    let (_, triples) = parse_triple_block(input).map_err(|err| format!("invalid triple template: {err:?}"))?;
+    if triples.len() != 1 {
+        return Err("triple templates must contain exactly one triple".to_string());
+    }
+    Ok(triples[0])
+}
+
 pub fn parse_ml_predict(input: &str) -> IResult<&str, MLPredictClause<'_>> {
     let (input, _) = multispace0.parse(input)?;
     let (input, _) = tag("ML.PREDICT").parse(input)?;
@@ -1263,8 +1699,8 @@ pub fn parse_ml_predict(input: &str) -> IResult<&str, MLPredictClause<'_>> {
             // Parse WHERE patterns and filters (simplified - use your actual WHERE parser)
             let where_clause = &input_query[where_idx + 5..].trim();
             // This is a placeholder - you should use your actual pattern and filter parser here
-            let (_rest, (patterns, filters, _values, _binds, _subqueries, _, _)) = 
-                parse_where(where_clause).unwrap_or_else(|_| (where_clause, (vec![], vec![], None, vec![], vec![], vec![], None)));
+            let (_rest, (patterns, filters, _values, _binds, _subqueries, _, _, _)) =
+                parse_where(where_clause).unwrap_or_else(|_| (where_clause, (vec![], vec![], None, vec![], vec![], vec![], vec![], None)));
             
             where_patterns = patterns;
             filter_conditions = filters;
@@ -1415,9 +1851,9 @@ fn parse_policy_duration_numeric(input: &str) -> IResult<&str, std::time::Durati
 }
 
 /// Parse the policy name / spec after `WITH POLICY`.
-/// - `steal`  → SyncPolicy::Steal
-/// - `wait`   → SyncPolicy::Wait
-/// - `(timeout=<dur>, fallback=steal|drop)` → SyncPolicy::Timeout{...}
+/// - `steal`  -> SyncPolicy::Steal
+/// - `wait`   -> SyncPolicy::Wait
+/// - `(timeout=<dur>, fallback=steal|drop)` -> SyncPolicy::Timeout{...}
 fn parse_sync_policy(input: &str) -> IResult<&str, shared::query::SyncPolicy> {
     alt((
         parse_sync_policy_steal,
@@ -1546,8 +1982,9 @@ pub fn parse_from_named_window(input: &str) -> IResult<&str, WindowClause<'_>> {
     }))
 }
 
-/// Parse a PROB(...) annotation for probabilistic rules.
-/// Format: PROB(combination=independent, threshold=0.3, confidence=0.9)
+/// Parse a PROB(...) annotation for provenance rules.
+/// Format: PROB(provenance=minmax, threshold=0.3, confidence=0.9)
+/// Legacy alias: PROB(combination=independent, threshold=0.3, confidence=0.9)
 fn parse_prob_annotation(input: &str) -> IResult<&str, ProbAnnotation<'_>> {
     let (input, _) = tag("PROB").parse(input)?;
     let (input, _) = multispace0.parse(input)?;
@@ -1568,7 +2005,7 @@ fn parse_prob_annotation(input: &str) -> IResult<&str, ProbAnnotation<'_>> {
             let key = key.trim();
             let value = value.trim();
             match key {
-                "combination" => combination = value,
+                "combination" | "provenance" => combination = value,
                 "threshold" => threshold = value.parse::<f64>().ok(),
                 "confidence" => confidence = value.parse::<f64>().ok(),
                 _ => {} // Ignore unknown keys
@@ -1586,6 +2023,7 @@ fn parse_prob_annotation(input: &str) -> IResult<&str, ProbAnnotation<'_>> {
 /// Parse a complete rule:
 ///   RULE :OverheatingAlert(?room) :- WHERE { ... } => { ... } .
 ///   RULE :Name PROB(combination=independent, threshold=0.3) :- CONSTRUCT { ... } WHERE { ... } .
+///   RULE :Name PROB(provenance=minmax, threshold=0.3) :- CONSTRUCT { ... } WHERE { ... } .
 pub fn parse_rule(input: &str) -> IResult<&str, CombinedRule<'_>> {
     let (input, _) = tag("RULE").parse(input)?;
     let (input, _) = space1.parse(input)?;
@@ -1631,23 +2069,27 @@ pub fn parse_rule(input: &str) -> IResult<&str, CombinedRule<'_>> {
     let (input, _) = multispace0.parse(input)?;
     
     // Parse WHERE clause
-    let (input, (patterns, filters, values_clause, binds, subqueries, _, _)) = parse_where(input)?;
+    let (input, (patterns, filters, values_clause, binds, subqueries, _, neg_patterns, _)) = parse_where(input)?;
     let body = (patterns, filters, values_clause, binds, subqueries);
-    
+
     // Optional dot at the end of rule
     let (input, _) = opt(preceded(multispace0, char('.'))).parse(input)?;
     let (input, _) = multispace0.parse(input)?;
-    
+
     // Optionally parse ML.PREDICT block if it exists
     let (input, ml_predict) = opt(parse_ml_predict).parse(input)?;
-    
+
     Ok((
         input,
         CombinedRule {
             head,
             stream_type,
             window_clause,
+            model_decls: Vec::new(),
+            neural_relation_decls: Vec::new(),
+            train_neural_relation_decls: Vec::new(),
             body,
+            negated_body: neg_patterns,
             conclusion: conclusions,
             ml_predict,
             prob_annotation,
@@ -1761,10 +2203,19 @@ pub fn parse_combined_query(input: &str) -> IResult<&str, CombinedQuery<'_>> {
     // Parse optional REGISTER clause
     let (input, register_clause) = opt(parse_register_clause).parse(input)?;
     let (input, _) = multispace0.parse(input)?;
+
+    let (input, (model_decls, neural_relation_decls, train_neural_relation_decls)) =
+        parse_top_level_neural_decls(input)?;
+    let (input, _) = multispace0.parse(input)?;
     
     // Parse the rule with ML.PREDICT if present
-    let (input, rule_opt) = opt(parse_rule).parse(input)?;
+    let (input, mut rule_opt) = opt(parse_rule).parse(input)?;
     let (input, _) = multispace0.parse(input)?;
+    if let Some(rule) = rule_opt.as_mut() {
+        rule.model_decls = model_decls.clone();
+        rule.neural_relation_decls = neural_relation_decls.clone();
+        rule.train_neural_relation_decls = train_neural_relation_decls.clone();
+    }
     
     // Optionally parse DELETE clause (before SPARQL query, per SPARQL Update spec)
     let (input, delete_clause) = opt(parse_delete).parse(input)?;
@@ -1773,10 +2224,10 @@ pub fn parse_combined_query(input: &str) -> IResult<&str, CombinedQuery<'_>> {
     // Parse the SPARQL query part
     let (input, sparql_parse) = if input.trim().is_empty() && delete_clause.is_none() {
         // No remaining input - create empty SPARQL parse result
-        (input, (None, vec![], vec![], vec![], vec![], HashMap::new(), None, vec![], vec![], None, vec![], vec![]))
+        (input, (None, vec![], vec![], vec![], vec![], HashMap::new(), None, vec![], vec![], None, vec![], vec![], None))
     } else if delete_clause.is_some() && input.trim().is_empty() {
         // DELETE with no WHERE clause — just the delete template
-        (input, (None, vec![], vec![], vec![], vec![], HashMap::new(), None, vec![], vec![], None, vec![], vec![]))
+        (input, (None, vec![], vec![], vec![], vec![], HashMap::new(), None, vec![], vec![], None, vec![], vec![], None))
     } else {
         // There's remaining input - try to parse it as SPARQL
         let (input, (insert_clause,
@@ -1791,7 +2242,8 @@ pub fn parse_combined_query(input: &str) -> IResult<&str, CombinedQuery<'_>> {
             limit,
             window,
             order_conditions,
-            _ )) = parse_sparql_query(input)?;
+            run_ml_clause
+        )) = parse_sparql_query(input)?;
         (input, (insert_clause,
             variables,
             patterns,
@@ -1803,7 +2255,9 @@ pub fn parse_combined_query(input: &str) -> IResult<&str, CombinedQuery<'_>> {
             subqueries,
             limit,
             window,
-            order_conditions))
+            order_conditions,
+            run_ml_clause
+        ))
     }; 
 
     Ok((
@@ -1812,8 +2266,24 @@ pub fn parse_combined_query(input: &str) -> IResult<&str, CombinedQuery<'_>> {
             prefixes,
             retrieve_clause,
             register_clause,
+            model_decls,
+            neural_relation_decls,
+            train_neural_relation_decls,
             rule: rule_opt,
-            sparql: sparql_parse,
+            sparql: SparqlObject {insert_clause: sparql_parse.0, 
+                variables: sparql_parse.1, 
+                patterns: sparql_parse.2, 
+                filters: sparql_parse.3, 
+                group_vars: sparql_parse.4, 
+                parsed_prefixes: sparql_parse.5, 
+                values: sparql_parse.6, 
+                binds: sparql_parse.7, 
+                subqueries: sparql_parse.8, 
+                limit: sparql_parse.9, 
+                window: sparql_parse.10, 
+                order_conditions: sparql_parse.11, 
+                run_ml_clause: sparql_parse.12
+            },
             delete_clause,
         },
     ))
@@ -1860,6 +2330,12 @@ pub fn convert_combined_rule<'a>(
     let premise_patterns = cr
         .body
         .0
+        .into_iter()
+        .map(|triple| convert_triple_pattern(triple, dict, prefixes))
+        .collect::<Vec<TriplePattern>>();
+
+    let negative_premise_patterns = cr
+        .negated_body
         .into_iter()
         .map(|triple| convert_triple_pattern(triple, dict, prefixes))
         .collect::<Vec<TriplePattern>>();
@@ -2022,33 +2498,12 @@ pub fn convert_combined_rule<'a>(
 
     Rule {
         premise: premise_patterns,
+        negative_premise: negative_premise_patterns,
         filters: filter_conditions,
         conclusion: conclusion_triples,
     }
 }
 
-/// Convert a CombinedRule with a PROB annotation into a ProbabilisticRule.
-pub fn convert_combined_rule_probabilistic<'a>(
-    cr: CombinedRule<'a>,
-    dict: &mut Dictionary,
-    prefixes: &HashMap<String, String>,
-) -> shared::probabilistic_rule::ProbabilisticRule {
-    let prob_ann = cr.prob_annotation.clone();
-    let base_rule = convert_combined_rule(cr, dict, prefixes);
-
-    if let Some(ann) = prob_ann {
-        let combination = shared::probabilistic_rule::parse_combination_mode(ann.combination)
-            .unwrap_or(shared::probabilistic_rule::ProbCombination::Independent);
-        shared::probabilistic_rule::ProbabilisticRule {
-            rule: base_rule,
-            combination,
-            threshold: ann.threshold.unwrap_or(0.0),
-            rule_confidence: ann.confidence.unwrap_or(1.0),
-        }
-    } else {
-        shared::probabilistic_rule::ProbabilisticRule::new(base_rule)
-    }
-}
 
 pub fn process_rule_definition(
     rule_input: &str,
@@ -2057,25 +2512,50 @@ pub fn process_rule_definition(
     // First, register any prefixes from the rule with the database
     database.register_prefixes_from_query(rule_input);
 
-    let mut kg = Reasoner::new();
-    kg.dictionary = database.dictionary.clone();
-    
-    for triple in database.triples.iter() {
-        kg.index_manager.insert(triple);
-    }
+    let parse_result = parse_combined_query(rule_input);
 
-    // Parse the standalone rule
-    let parse_result = parse_standalone_rule(rule_input);
-
-    if let Ok((_rest, (rule, prefixes))) = parse_result {
-        // Ensure all prefixes from the rule are in the database
-        for (prefix, uri) in &prefixes {
+    if let Ok((_rest, combined)) = parse_result {
+        for (prefix, uri) in &combined.prefixes {
             database.prefixes.insert(prefix.clone(), uri.clone());
         }
 
-        // Convert the rule, ensuring it has access to all prefixes
-        let mut rule_prefixes = prefixes.clone();
+        let mut rule_prefixes = combined.prefixes.clone();
         database.share_prefixes_with(&mut rule_prefixes);
+        register_neural_declarations(
+            database,
+            &rule_prefixes,
+            &combined.model_decls,
+            &combined.neural_relation_decls,
+            &combined.train_neural_relation_decls,
+        );
+
+        let normalized_trains: Vec<TrainNeuralRelationDecl> = combined
+            .train_neural_relation_decls
+            .iter()
+            .filter_map(|decl| {
+                let normalized_pred = database.resolve_query_term(&decl.predicate, &rule_prefixes);
+                database
+                    .train_neural_relation_decls
+                    .get(&normalized_pred)
+                    .cloned()
+            })
+            .collect();
+        for train_decl in &normalized_trains {
+            execute_train_decl(database, train_decl).map_err(|err| err.to_string())?;
+        }
+
+        let rule = combined
+            .rule
+            .ok_or_else(|| "Failed to parse rule definition".to_string())?;
+
+        materialize_neural_relations_for_patterns(database, &rule.body.0, &rule_prefixes)?;
+
+        let mut kg = Reasoner::new();
+        kg.dictionary = database.dictionary.clone();
+        for triple in database.triples.iter() {
+            kg.index_manager.insert(triple);
+        }
+        kg.probability_seeds = database.probability_seeds.clone();
 
         let mut dict = kg.dictionary.write().unwrap();
         let dynamic_rule = convert_combined_rule(rule.clone(), &mut dict, &rule_prefixes);
@@ -2170,18 +2650,113 @@ pub fn process_rule_definition(
         }
 
         // Non-windowed rule processing
-        // Check if this is a probabilistic rule
+        // Check if this is a provenance-annotated rule
         if rule.prob_annotation.is_some() {
-            let mut dict = kg.dictionary.write().unwrap();
-            let prob_rule = convert_combined_rule_probabilistic(rule.clone(), &mut dict, &rule_prefixes);
-            drop(dict);
+            let ann = rule.prob_annotation.as_ref().unwrap();
 
-            kg.add_probabilistic_rule(prob_rule);
-
-            // Register rule predicates (using the classical rule for predicate tracking)
+            kg.add_rule(dynamic_rule.clone());
             register_rule_predicates(&dynamic_rule, database);
 
-            let inferred_facts = kg.infer_new_facts_probabilistic_semi_naive();
+            // Choose provenance based on annotation, then materialize tags as RDF-star
+            let provenance_type = ann.combination;
+            let inferred_facts = match provenance_type {
+                "minmax" | "min" => {
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(shared::provenance::MinMaxProbability);
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+                "addmult" | "independent" => {
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(shared::provenance::AddMultProbability);
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+                "boolean" => {
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(shared::provenance::BooleanProvenance);
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+                // Exact proof-formula provenance (WMC via Shannon expansion)
+                "wmc" => {
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(
+                        shared::provenance::WmcProvenance::new()
+                    );
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star_with_explanation(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+                // SDD-based exact proof-formula provenance (WMC via SDD)
+                "sdd" => {
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(
+                        shared::sdd::SddProvenance::new()
+                    );
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star_with_explanation(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+                // Top-K proof-tracking provenance.
+                // k is read from the threshold field (default 5).
+                // Syntax: PROB(combination=topk) or PROB(combination=topk, threshold=10)
+                "topk" => {
+                    let k = ann.threshold.map(|t| t as usize).unwrap_or(5);
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(
+                        shared::provenance::TopKProofs::new(k)
+                    );
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+                _ => {
+                    let (facts, tag_store) = kg.infer_new_facts_with_provenance(shared::provenance::MinMaxProbability);
+                    let mut dict = kg.dictionary.write().unwrap();
+                    let mut qt_store = database.quoted_triple_store.write().unwrap();
+                    let rdf_star = tag_store.encode_as_rdf_star(&mut dict, &mut qt_store);
+                    drop(qt_store);
+                    drop(dict);
+                    for triple in rdf_star {
+                        database.triples.insert(triple);
+                    }
+                    facts
+                }
+            };
 
             for triple in inferred_facts.iter() {
                 database.triples.insert(triple.clone());
@@ -2339,4 +2914,3 @@ fn register_rule_predicates(rule: &Rule, database: &mut SparqlDatabase) {
         }
     }
 }
-

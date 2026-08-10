@@ -15,9 +15,12 @@ use super::stats::DatabaseStats;
 
 use crate::sparql_database::SparqlDatabase;
 use crate::streamertail_optimizer::operators::logical::ModelGetter;
+use crate::streamertail_optimizer::operators::physical::ModelGetterPhysical;
 use shared::terms::{Term, TriplePattern};
+use shared::triple::Triple;
 use shared::query::FilterExpression;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::format;
 use std::sync::Arc;
 
 /// Volcano-style query optimizer with cost-based optimization
@@ -25,6 +28,7 @@ pub struct Streamertail {
     pub memo: HashMap<String, PhysicalOperator>,
     pub selected_variables: Vec<String>,
     pub stats: Arc<DatabaseStats>,
+    pub mlmemo: HashMap<(BTreeSet<Triple>, String), Vec<HashMap<String, u32>>>
 }
 
 fn serialize_arith_expr(expr: &shared::query::ArithmeticExpression) -> String {
@@ -46,6 +50,7 @@ impl Streamertail {
             memo: HashMap::new(),
             selected_variables: Vec::new(),
             stats,
+            mlmemo: HashMap::new()
         }
     }
 
@@ -54,6 +59,7 @@ impl Streamertail {
             memo: HashMap::new(),
             selected_variables: Vec::new(),
             stats,
+            mlmemo: HashMap::new()
         }
     }
 
@@ -152,14 +158,53 @@ impl Streamertail {
         }
     }
 
+    fn has_ml_predict(&self, plan: &LogicalOperator) -> bool {
+        match plan {
+            LogicalOperator::Scan { pattern } => {
+                false
+            }
+            LogicalOperator::Join { left, right } => {
+                self.has_ml_predict(left) || self.has_ml_predict(right)
+            }
+            LogicalOperator::Selection { predicate, ..  } => {
+                self.has_ml_predict(predicate)
+            }
+            LogicalOperator::Projection { predicate, .. } => {
+                self.has_ml_predict(predicate)
+            }
+            LogicalOperator::Buffer { content: _, origin: _ } => { false }
+            LogicalOperator::Subquery { inner, .. } => {
+                // Subqueries are treated as separate scopes, so we don't collect their patterns
+                // for star query detection in the outer query
+                self.has_ml_predict(inner)
+            }
+            LogicalOperator::Bind { input, .. } => {
+                self.has_ml_predict(input)
+            }
+            LogicalOperator::Values { .. } => { false }
+            LogicalOperator::MLPredict { input, model_name, .. } => {
+                match model_name {
+                    ModelGetter::MLPredict(..) => {
+                        self.has_ml_predict(input)
+                    }
+                    ModelGetter::RunMLClause(..) => {true}
+                }
+            }
+        }
+    }
+
     fn collect_patterns(&self, plan: &LogicalOperator, patterns: &mut Vec<TriplePattern>) {
         match plan {
             LogicalOperator::Scan { pattern } => {
                 patterns.push(pattern.clone());
             }
             LogicalOperator::Join { left, right } => {
-                self.collect_patterns(left, patterns);
-                self.collect_patterns(right, patterns);
+                if !self.has_ml_predict(left.as_ref()){
+                    self.collect_patterns(left, patterns);
+                }
+                if !self.has_ml_predict(right.as_ref()){
+                    self.collect_patterns(right, patterns);
+                }
             }
             LogicalOperator::Selection { predicate, ..  } => {
                 self.collect_patterns(predicate, patterns);
@@ -182,10 +227,132 @@ impl Streamertail {
                     ModelGetter::MLPredict(..) => {
                         self.collect_patterns(input, patterns);
                     }
-                    ModelGetter::RunMLClause(..) => { }
+                    ModelGetter::RunMLClause(..) => {patterns.clear();}
                 }
             }
         }
+    }
+
+    fn bubble_up_runmlclause(
+        &self,
+        logicalOp: &LogicalOperator,
+        mlinput: &LogicalOperator,
+        mlretrieval: &LogicalOperator,
+        input_variables: Vec<String>, 
+        output_var: String
+    ) -> LogicalOperator {
+        match logicalOp {
+            LogicalOperator::Join { left, right } => {
+                let removed_ml = LogicalOperator::join(self.get_lo_without_ml(left), self.get_lo_without_ml(right));
+                if (self.estimate_logical_cost(logicalOp) < self.estimate_logical_cost(mlinput)){
+                    return LogicalOperator::run_ml_clause_lo(logicalOp.clone(), mlinput.clone(), input_variables, output_var)
+                }
+                // This function needs to be applied before a Join reordering, meaning that the joins are left-deep
+                return self.bubble_up_runmlclause(left, mlinput, mlretrieval, input_variables, output_var)
+            }
+            LogicalOperator::Scan {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Buffer {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Selection { predicate, condition } => {
+                return LogicalOperator::selection(self.bubble_up_runmlclause(predicate, mlinput, mlretrieval, input_variables, output_var), condition.clone());
+            }
+            LogicalOperator::MLPredict {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Projection { predicate, variables } => {
+                return LogicalOperator::projection(self.bubble_up_runmlclause(predicate, mlinput, mlretrieval, input_variables, output_var), variables.clone())
+            }
+            LogicalOperator::Subquery { inner, projected_vars } => {
+                return LogicalOperator::subquery(self.bubble_up_runmlclause(inner.as_ref(), mlinput, mlretrieval, input_variables, output_var), projected_vars.clone());
+            }
+            LogicalOperator::Values {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
+                return LogicalOperator::bind(self.bubble_up_runmlclause(input.as_ref(), mlinput, mlretrieval, input_variables, output_var), function_name.clone(), arguments.clone(), output_variable.clone())
+            }
+        }
+    }
+
+    fn get_lo_without_ml(&self, logicalOp: &LogicalOperator) -> LogicalOperator {
+        match logicalOp {
+            LogicalOperator::Join { left, right } => {
+                return LogicalOperator::join(self.get_lo_without_ml(left), self.get_lo_without_ml(right));
+            }
+            LogicalOperator::MLPredict { input, model_name, input_variables, output_variable } => {
+                match model_name {
+                    ModelGetter::RunMLClause(lo) => {
+                        return lo.as_ref().clone();
+                    }
+                    ModelGetter::MLPredict(name) => {
+                        return logicalOp.clone();
+                    }
+                }
+            }
+            LogicalOperator::Scan {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Buffer {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Selection {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Projection {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Subquery {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Values {..} => {
+                return logicalOp.clone();
+            }
+            LogicalOperator::Bind {..} => {
+                return logicalOp.clone();
+            }
+        }
+    }
+
+    fn ml_exists(&self, logicalOp: &LogicalOperator) -> Option<(LogicalOperator, LogicalOperator, Vec<String>, String)> {
+        match logicalOp {
+            LogicalOperator::MLPredict { input, model_name, input_variables, output_variable } => {
+                match model_name {
+                    ModelGetter::RunMLClause(op) => {
+                        return Some((logicalOp.clone(), op.as_ref().clone(), input_variables.clone(), output_variable.clone()));
+                    }
+                    _ => {return None;}
+                }
+            }
+            LogicalOperator::Projection { predicate, variables } => {
+                self.ml_exists(predicate.as_ref())
+            }
+            LogicalOperator::Bind { input, function_name, arguments, output_variable } => {
+                self.ml_exists(input.as_ref())
+            }
+            LogicalOperator::Selection { predicate, condition } => {
+                self.ml_exists(predicate.as_ref())
+            }
+            // ml_exists is called before any query optimization, so the query is initially left-deep
+            LogicalOperator::Join { left, right } => {
+                self.ml_exists(left.as_ref())
+            }
+            LogicalOperator::Subquery { inner, projected_vars } => {
+                self.ml_exists(inner.as_ref())
+            }
+            _ => None
+        }
+    }
+
+    pub fn find_best_plan_recursive_optimised(&mut self, logical_plan: &LogicalOperator, database: &SparqlDatabase) -> PhysicalOperator {
+        let mut logical_plan_clone = logical_plan.clone();
+        if let Some((mlinput, mlretrieval, input_vars, output_var)) = self.ml_exists(logical_plan){
+            logical_plan_clone = self.bubble_up_runmlclause(logical_plan, &mlinput, &mlretrieval, input_vars, output_var);
+        }
+
+        self.find_best_plan_recursive(&logical_plan_clone, database)
     }
 
     /// Recursively finds the best plan using dynamic programming with memoization
@@ -366,7 +533,7 @@ impl Streamertail {
                     }
                     ModelGetter::RunMLClause(argument) => {
                         let models = ExecutionEngine::execute_with_ids(&self.find_best_plan_recursive(argument.as_ref(), database), &mut database.clone());
-                        // let numModels = models.len();
+                        // self.mlmemo.insert((database.triples.clone(), physical_operator_ml_string.clone()), models.clone());
                     
                         // Vector of HashMaps which have a single key-value pair
                         // Each of the HashMaps have the same key: the variable storing the machine learning models
@@ -570,6 +737,100 @@ impl Streamertail {
     /// Creates a memo key for caching optimized plans
     fn create_memo_key(&self, logical_plan: &LogicalOperator) -> String {
         self.serialize_logical_plan(logical_plan)
+    }
+
+    /// Serializes a physical plan to a string for memoization
+    fn serialize_physical_plan(&self, plan: &PhysicalOperator) -> String {
+        match plan {
+            PhysicalOperator::Bind { input, function_name, arguments, output_variable } => {
+                format!("Bind([{:?}],{:?},{:?},{:?})", self.serialize_physical_plan(input.as_ref()), function_name, arguments, output_variable)
+            }
+            PhysicalOperator::Filter { input, condition } => {
+                format!(
+                    "Filter([{}], {})",
+                    self.serialize_physical_plan(input),
+                    self.serialize_filter_expression(&condition.expression)
+                )
+            }
+            PhysicalOperator::Projection {
+                input,
+                variables,
+            } => {
+                format!(
+                    "Projection({:?},[{}])",
+                    variables,
+                    self.serialize_physical_plan(input)
+                )
+            }
+            PhysicalOperator::HashJoin { left, right } => {
+                format!(
+                    "HashJoin([{:?}], [{:?}])", 
+                    self.serialize_physical_plan(left),
+                    self.serialize_physical_plan(right)
+                )
+            }
+            PhysicalOperator::OptimizedHashJoin { left, right } => {
+                format!(
+                    "OptimizedHashJoin([{:?}], [{:?}])", 
+                    self.serialize_physical_plan(left),
+                    self.serialize_physical_plan(right)
+                )
+            }
+            PhysicalOperator::NestedLoopJoin { left, right } => {
+                format!(
+                    "NestedJoin([{:?}], [{:?}])", 
+                    self.serialize_physical_plan(left),
+                    self.serialize_physical_plan(right)
+                )
+            }
+            PhysicalOperator::ParallelJoin { left, right } => {
+                format!(
+                    "ParallelJoin([{:?}], [{:?}])", 
+                    self.serialize_physical_plan(left),
+                    self.serialize_physical_plan(right)
+                )
+            }
+            PhysicalOperator::StarJoin { join_var, patterns } => {
+                format!(
+                    "StarJoin({:?}, {:?})", 
+                    join_var,
+                    patterns
+                )
+            }
+            PhysicalOperator::InMemoryBuffer { content, origin } => {
+                format!("InMemoryBuffer({:?}, {:?})", content, origin)
+            }
+            PhysicalOperator::IndexScan { pattern } => {
+                format!("IndexScan({:?})", pattern)
+            }
+            PhysicalOperator::MLPredict { input, model_name, model_path, input_variables, output_variable } => {
+                let modelstr = match model_name {
+                    ModelGetterPhysical::MLPredictPhysical(mlstring) => {
+                        mlstring
+                    }
+                    ModelGetterPhysical::RunMLClausePhysical(mlid, ml) => {
+                        &format!("RunMLClausePhysical({:?}, {:?})", mlid, ml)
+                    }
+                };
+                format!(
+                    "MLPredict([{:?}], {:?}, {:?}, {:?}, {:?})",
+                    self.serialize_physical_plan(input),
+                    modelstr,
+                    model_path,
+                    input_variables,
+                    output_variable
+                )
+            }
+            PhysicalOperator::TableScan { pattern } => {
+                format!("TableScan({:?})", pattern)
+            }
+            PhysicalOperator::Values { variables, values } => {
+                format!("Values({:?}, {:?})", variables, values)
+            }
+            PhysicalOperator::Subquery { inner, projected_vars } => {
+                format!("Subquery([{:?}], {:?})", self.serialize_physical_plan(inner), projected_vars)
+            }
+        }
     }
 
     /// Serializes a logical plan to a string for memoization
@@ -1055,78 +1316,4 @@ mod tests {
         assert_eq!(format!("{expected_physical_operator:?}"), format!("{produced_physical_operator:?}"));
 
     }
-
-    // #[test]
-    // fn test_physical_plan_creation_runmlclause() {
-    //     let database = &mut SparqlDatabase::new();
-    //     let mut stats = DatabaseStats::new();
-    //     let mut dict = database.dictionary.write().unwrap();
-
-    //     let mut prefixes = HashMap::new();
-    //     let mut optimizer = create_test_optimizer();
-
-    //     prefixes.insert("hvac".to_string(), "https://factoryass.org/measures".to_string());
-    //     prefixes.insert("rdf".to_string(), "https://rdf.org".to_string());
-    //     prefixes.insert("mls".to_string(), "https://mls.org".to_string());
-
-    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor1", &prefixes)), 5);
-    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor2", &prefixes)), 5);
-    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasSensor3", &prefixes)), 5);
-    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("hvac:hasValue", &prefixes)), 5);
-    //     stats.predicate_cardinalities.insert(dict.encode(&resolve_with_prefixes("rdf:type", &prefixes)), 2);
-    //     stats.predicate_cardinalities.insert(dict.encode("mls:hasOutput"), 2);
-    //     stats.object_cardinalities.insert(dict.encode("mls:Run"), 2);
-    //     stats.object_cardinalities.insert(dict.encode("mls:Model"), 2);
-
-    //     drop(dict);
-        
-        
-    //     let scan1 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor1", "?sensor1", &prefixes, database));
-    //     let scan2 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor2", "?sensor2", &prefixes, database));
-    //     let scan3 = LogicalOperator::scan(convert_pattern_to_triple("?machine", "hvac:hasSensor3", "?sensor3", &prefixes, database));
-
-    //     let mut inputlogicalop = LogicalOperator::join(scan1, scan2);
-    //     inputlogicalop = LogicalOperator::join(inputlogicalop, scan3);
-    //     let star_join_physical = inputlogicalop.clone();
-
-    //     let mlscan1 = LogicalOperator::scan(convert_pattern_to_triple("?r", "rdf:type", "mls:Run", &prefixes, database));
-    //     let mlscan2 = LogicalOperator::scan(convert_pattern_to_triple("?r", "mls:hasOutput", "?mlmodel", &prefixes, database));
-    //     let mlscan3 = LogicalOperator::scan(convert_pattern_to_triple("?mlmodel", "rdf:type", "mls:Model", &prefixes, database));
-
-    //     let mut mllogicalop = LogicalOperator::join(mlscan1, mlscan2);
-    //     mllogicalop = LogicalOperator::join(mllogicalop, mlscan3);
-    //     let star_join_ml = mllogicalop.clone();
-    //     mllogicalop = LogicalOperator::projection(mllogicalop, Vec::from(["?mlmodel".to_string()]));
-
-    //     inputlogicalop = LogicalOperator::run_ml_clause_lo(inputlogicalop, mllogicalop.clone(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
-    //     inputlogicalop = LogicalOperator::join(
-    //         inputlogicalop, 
-    //         LogicalOperator::scan(
-    //             convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
-    //         )
-    //     );
-    //     inputlogicalop = LogicalOperator::projection(inputlogicalop, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
-
-    //     let star_option = optimizer.is_star_query(&star_join_physical);
-    //     assert!(star_option.is_some());
-    //     let star = star_option.unwrap();
-    //     let star_physical = optimizer.build_star_join_from_patterns(star.clone(), &star_join_physical);
-        
-    //     let star_ml_option = optimizer.is_star_query(&mllogicalop);
-    //     assert!(star_ml_option.is_some());
-    //     let star_ml_val = star_ml_option.unwrap();
-    //     let mut star_ml = optimizer.build_star_join_from_patterns(star_ml_val, &star_join_ml);
-    //     star_ml = PhysicalOperator::projection(star_ml, Vec::from(["?mlmodel".to_string()]));
-
-    //     let leftPhys = optimizer.choose_best_scan(
-    //         &convert_pattern_to_triple("?x", "hvac:hasValue", "brokenPrediction", &prefixes, database)
-    //     );
-    //     let mut expected_physical_operator = PhysicalOperator::run_ml_clause(star_physical, star_ml, optimizer.discover_model_path(), Vec::from(["?sensor1".to_string(), "?sensor2".to_string(), "?sensor3".to_string()]), "?brokenPrediction".to_string());
-    //     expected_physical_operator = PhysicalOperator::optimized_hash_join(leftPhys, expected_physical_operator);
-    //     expected_physical_operator = PhysicalOperator::projection(expected_physical_operator, Vec::from(["?machine".to_string(), "?brokenPrediction".to_string()]));
-
-    //     let produced_physical_operator = optimizer.find_best_plan_recursive(&inputlogicalop);
-        
-    //     assert_eq!(format!("{expected_physical_operator:?}"), format!("{produced_physical_operator:?}"));
-    // }
 }

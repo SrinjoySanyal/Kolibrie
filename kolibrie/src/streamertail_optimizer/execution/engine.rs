@@ -21,12 +21,19 @@ use super::super::CostEstimator;
 
 use shared::quoted_triple_store::is_quoted_triple_id;
 
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, println};
 
 /// Execution engine for physical operators
-pub struct ExecutionEngine;
+// pub struct ExecutionEngine {
+//     pub predictionMemo: HashMap<(String, Vec<HashMap<String, u32>>), MLPredictionResult>
+// }
+
+pub struct ExecutionEngine {}
 
 impl ExecutionEngine {
+    // pub fn new() -> Self {
+    //     Self { predictionMemo: HashMap::new() }
+    // }
     /// Executes a physical operator and returns string results
     pub fn execute(
         operator: &PhysicalOperator,
@@ -356,6 +363,7 @@ impl ExecutionEngine {
                         let mut input_results = Self::execute_with_ids(input, database);
                         
                         if input_results.is_empty() {
+                            println!("Input is empty");
                             return input_results;
                         }
 
@@ -364,25 +372,7 @@ impl ExecutionEngine {
 
                         // println!("physical op = {physicalop:?}");
 
-                        // let models = Self::execute_with_ids(physicalop, database);
-                        // // let numModels = models.len();
-                    
-                        // // Vector of HashMaps which have a single key-value pair
-                        // // Each of the HashMaps have the same key: the variable storing the machine learning models
-                        // let namelist: Vec<HashMap<String, String>> = models.clone().into_iter()
-                        // .map(|id_result| {
-                        //     let dict = database.dictionary.read().unwrap();
-                        //     let result = id_result
-                        //     .into_iter()
-                        //     // maps the id of a model name value to the model value itself
-                        //     .map(|(var, id)| (var, dict.decode(id).unwrap().to_string()))
-                        //     .collect();
-                        //     drop(dict);
-                        //     result
-                        // })
-                        // .collect();
-                        // println!("[RUN_ML_CLAUSE] Models retrieved: {namelist:?}");
-
+                        // Only retrieves data from the columns that were passes as parameter to the RUN keyword
                         let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
 
                         let model_id_dict = &models[0];
@@ -422,12 +412,403 @@ impl ExecutionEngine {
                                 input_results.append(&mut cloned_inputs);
                             }
                         }  
+                        // println!("input results = {input_results:?}");
                         input_results                     
                     }
                 }
             }
         }
     }
+
+    // /// Executes a physical operator and returns ID-based results for performance
+    // pub fn execute_with_ids_optimized(
+    //     &mut self,
+    //     operator: &PhysicalOperator,
+    //     database: &mut SparqlDatabase,
+    // ) -> Vec<HashMap<String, u32>> {
+    //     match operator {
+    //         PhysicalOperator::TableScan { pattern } => {
+    //             if Self::has_quoted_triple_term(pattern) {
+    //                 Self::resolve_quoted_triple_scan(database, pattern)
+    //             } else {
+    //                 Self::execute_table_scan_with_ids(database, pattern)
+    //             }
+    //         }
+    //         PhysicalOperator::IndexScan { pattern } => {
+    //             if Self::has_quoted_triple_term(pattern) {
+    //                 Self::resolve_quoted_triple_scan(database, pattern)
+    //             } else {
+    //                 Self::execute_index_scan_with_ids(database, pattern)
+    //             }
+    //         }
+    //         PhysicalOperator::Filter { input, condition } => {
+    //             let input_results = Self::execute_with_ids(input, database);
+    //             // Use parallel filtering
+    //             input_results
+    //             .into_par_iter()
+    //             .filter(|result| {
+    //                 let dict = database.dictionary.read().unwrap();
+    //                 let result = condition.evaluate_with_ids(result, &*dict);
+    //                 drop(dict);
+    //                 result
+    //             })
+    //             .collect()
+    //         }
+    //         PhysicalOperator::Projection { input, variables } => {
+    //             let input_results = Self::execute_with_ids(input, database);
+    //             // println!("input results = {input_results:?}");
+
+    //             // Strip '?' prefix from projection variables for matching
+    //             let stripped_vars: Vec<String> = variables
+    //                 .iter()
+    //                 .map(|v| v.strip_prefix('?').unwrap_or(v).to_string())
+    //                 .collect();
+
+    //             let projected: Vec<HashMap<String, u32>> = input_results
+    //                 .into_par_iter()
+    //                 .map(|mut result| {
+    //                     result.retain(|k, _| {
+    //                         let k_stripped = k.strip_prefix('?').unwrap_or(k);
+    //                         stripped_vars.contains(&k_stripped.to_string())
+    //                     });
+    //                     result
+    //                 })
+    //                 .collect();
+    //             projected
+    //         }
+    //         PhysicalOperator::OptimizedHashJoin { left, right } => {
+    //             let left_results = Self::execute_with_ids(left, database);
+    //             let right_results = Self::execute_with_ids(right, database);
+    //             Self::execute_optimized_hash_join_with_ids(left_results, right_results)
+    //         }
+    //         PhysicalOperator::HashJoin { left, right } => {
+    //             let left_results = Self::execute_with_ids(left, database);
+    //             let right_results = Self::execute_with_ids(right, database);
+    //             Self::execute_hash_join_with_ids(left_results, right_results)
+    //         }
+    //         PhysicalOperator::NestedLoopJoin { left, right } => {
+    //             let left_results = Self::execute_with_ids(left, database);
+    //             let right_results = Self::execute_with_ids(right, database);
+    //             Self::execute_nested_loop_join_with_ids(left_results, right_results)
+    //         }
+    //         PhysicalOperator::ParallelJoin { left, right } => {
+    //             Self::execute_parallel_join_with_ids(left, right, database)
+    //         }
+    //         PhysicalOperator::StarJoin { join_var, patterns } => {
+    //             Self::execute_star_join_with_ids(database, join_var, patterns)
+    //         }
+    //         PhysicalOperator::InMemoryBuffer { content, origin: _ } => {
+    //             content.clone() // TODO: make sure we dont have to clone here
+    //         }
+    //         PhysicalOperator:: Subquery { inner, projected_vars } => {
+    //             // Execute the inner query with IDs
+    //             let inner_results = Self::execute_with_ids(inner, database);
+                
+    //             // Project only the requested variables
+    //             inner_results
+    //                 .into_iter()
+    //                 .map(|mut row| {
+    //                     row.retain(|k, _| projected_vars.contains(&k.to_string()));
+    //                     row
+    //                 })
+    //                 .collect()
+    //         }
+    //         PhysicalOperator::Bind { input, function_name, arguments, output_variable } => {
+    //             let mut input_results = Self::execute_with_ids(input, database);
+    //             let output_var = output_variable.strip_prefix('?').unwrap_or(output_variable);
+
+    //             if function_name == "CONCAT" {
+    //                 // Decode all needed values first
+    //                 let dict = database.dictionary.read().unwrap();
+    //                 let decoded_values: Vec<Vec<String>> = input_results
+    //                     .iter()
+    //                     .map(|row| {
+    //                         arguments
+    //                             .iter()
+    //                             .map(|arg| {
+    //                                 let arg_stripped = arg.strip_prefix('?').unwrap_or(arg);
+    //                                 if arg.starts_with('?') {
+    //                                     if let Some(&id) = row.get(arg_stripped) {
+    //                                         dict.decode(id).unwrap_or("").to_string()
+    //                                     } else {
+    //                                         String::new()
+    //                                     }
+    //                                 } else {
+    //                                     arg.trim_matches('"').to_string()
+    //                                 }
+    //                             })
+    //                             .collect()
+    //                     })
+    //                     .collect();
+    //                 drop(dict);
+                    
+    //                 // Now encode the concatenated results
+    //                 let mut dict_write = database.dictionary.write().unwrap();
+    //                 for (row, decoded_row) in input_results.iter_mut().zip(decoded_values.iter()) {
+    //                     let concatenated = decoded_row.join("");
+    //                     let result_id = dict_write.encode(&concatenated);
+    //                     row.insert(output_var.to_string(), result_id);
+    //                 }
+    //                 drop(dict_write);
+                    
+    //                 input_results
+    //             } else if let Some(func) = database.udfs.get(function_name.as_str()) {
+    //                 // Similar fix for UDF
+    //                 let dict = database.dictionary.read().unwrap();
+    //                 let decoded_args: Vec<Vec<String>> = input_results
+    //                     .iter()
+    //                     .map(|row| {
+    //                         arguments
+    //                             .iter()
+    //                             .map(|arg| {
+    //                                 let arg_stripped = arg.strip_prefix('?').unwrap_or(arg);
+    //                                 if arg.starts_with('?') {
+    //                                     if let Some(&id) = row.get(arg_stripped) {
+    //                                         dict.decode(id).unwrap_or("").to_string()
+    //                                     } else {
+    //                                         String::new()
+    //                                     }
+    //                                 } else {
+    //                                     arg.trim_matches('"').to_string()
+    //                                 }
+    //                             })
+    //                             .collect()
+    //                     })
+    //                     .collect();
+    //                 drop(dict);
+                    
+    //                 let mut dict_write = database.dictionary.write().unwrap();
+    //                 for (row, decoded_row) in input_results.iter_mut().zip(decoded_args.iter()) {
+    //                     let resolved_args: Vec<&str> = decoded_row.iter().map(|s| s.as_str()).collect();
+    //                     let result = func.call(resolved_args);
+    //                     let result_id = dict_write.encode(&result);
+    //                     row.insert(output_var.to_string(), result_id);
+    //                 }
+    //                 drop(dict_write);
+                    
+    //                 input_results
+    //             } else if function_name == "SUBJECT" || function_name == "PREDICATE" || function_name == "OBJECT" {
+    //                 let qt_store = database.quoted_triple_store.read().unwrap();
+    //                 for row in &mut input_results {
+    //                     if let Some(arg) = arguments.first() {
+    //                         let arg_stripped = arg.strip_prefix('?').unwrap_or(arg);
+    //                         if let Some(&id) = row.get(arg_stripped) {
+    //                             if is_quoted_triple_id(id) {
+    //                                 if let Some((s, p, o)) = qt_store.decode(id) {
+    //                                     let component = match function_name.as_str() {
+    //                                         "SUBJECT" => s,
+    //                                         "PREDICATE" => p,
+    //                                         "OBJECT" => o,
+    //                                         _ => unreachable!(),
+    //                                     };
+    //                                     row.insert(output_var.to_string(), component);
+    //                                 }
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //                 drop(qt_store);
+    //                 input_results
+    //             } else if function_name == "TRIPLE" {
+    //                 if arguments.len() == 3 {
+    //                     for row in &mut input_results {
+    //                         let args: Vec<Option<u32>> = arguments.iter().map(|arg| {
+    //                             let arg_stripped = arg.strip_prefix('?').unwrap_or(arg);
+    //                             if arg.starts_with('?') {
+    //                                 row.get(arg_stripped).copied()
+    //                             } else {
+    //                                 let mut dict = database.dictionary.write().unwrap();
+    //                                 Some(dict.encode(arg_stripped))
+    //                             }
+    //                         }).collect();
+    //                         if let (Some(s), Some(p), Some(o)) = (args[0], args[1], args[2]) {
+    //                             let mut qt_store = database.quoted_triple_store.write().unwrap();
+    //                             let qt_id = qt_store.encode(s, p, o);
+    //                             row.insert(output_var.to_string(), qt_id);
+    //                         }
+    //                     }
+    //                 }
+    //                 input_results
+    //             } else if function_name == "isTRIPLE" {
+    //                 let mut dict_write = database.dictionary.write().unwrap();
+    //                 for row in &mut input_results {
+    //                     if let Some(arg) = arguments.first() {
+    //                         let arg_stripped = arg.strip_prefix('?').unwrap_or(arg);
+    //                         if let Some(&id) = row.get(arg_stripped) {
+    //                             let result_str = if is_quoted_triple_id(id) { "true" } else { "false" };
+    //                             let result_id = dict_write.encode(result_str);
+    //                             row.insert(output_var.to_string(), result_id);
+    //                         }
+    //                     }
+    //                 }
+    //                 drop(dict_write);
+    //                 input_results
+    //             } else {
+    //                 eprintln!("Function {} not found", function_name);
+    //                 input_results
+    //             }
+    //         }
+    //         PhysicalOperator::Values { variables, values } => {
+    //             let stripped_vars: Vec<String> = variables
+    //                 .iter()
+    //                 .map(|v| v.strip_prefix('?').unwrap_or(v).to_string())
+    //                 .collect();
+
+    //             // Convert VALUES data to result rows
+    //             let mut results = Vec::new();
+    
+    //             let mut dict = database.dictionary.write().unwrap();
+    //             for value_row in values {
+    //                 let mut row = HashMap::new();
+        
+    //                 for (i, var) in stripped_vars.iter().enumerate() {
+    //                     if let Some(Some(value)) = value_row.get(i) {
+    //                         // Encode the value in the dictionary
+    //                         let value_id = dict.encode(value);
+    //                         row.insert(var.clone(), value_id);
+    //                     }
+    //                 }
+        
+    //                 // Only add non-empty rows
+    //                 if !row.is_empty() {
+    //                     results.push(row);
+    //                 }
+    //             }
+    //             drop(dict);
+    
+    //             results
+    //         }
+    //         PhysicalOperator::MLPredict {
+    //             input,
+    //             model_name,
+    //             model_path,
+    //             input_variables,
+    //             output_variable,
+    //         } => {
+
+    //             match model_name {
+    //                 ModelGetterPhysical::MLPredictPhysical(somepath) => {
+    //                     // Execute the input operator first
+    //                     let mut input_results = Self::execute_with_ids(input, database);
+                        
+    //                     if input_results.is_empty() {
+    //                         return input_results;
+    //                     }
+
+    //                     println!("[ML.PREDICT] Executing prediction with model: {}", somepath);
+    //                     println!("[ML.PREDICT] Model path: {}", model_path);
+    //                     println!("[ML.PREDICT] Input variables: {:?}", input_variables);
+    //                     println!("[ML.PREDICT] Output variable: {}", output_variable);
+    //                     println!("[ML.PREDICT] Input rows: {}", input_results.len());
+
+    //                     // Extract input data for ML prediction
+    //                     let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
+
+    //                     // Call the existing ML handler infrastructure
+    //                     match Self::invoke_ml_handler(model_path, (*somepath).as_str(), input_data, 3) {
+    //                         Ok(predictions) => {
+    //                             input_results = Self::merge_ml_predictions(input_results, predictions, output_variable, database);
+    //                         }
+    //                         Err(e) => {
+    //                             eprintln!("[ML.PREDICT] Error executing ML model: {}", e);
+    //                             return input_results;
+    //                         }
+    //                     }
+
+    //                     input_results
+    //                 }
+
+    //                 ModelGetterPhysical::RunMLClausePhysical(models, namelist) => {
+    //                     // not worth it to determine if the retrieval of the input results should be executed before the retrieval of the 
+    //                     let mut input_results = Self::execute_with_ids(input, database);
+                        
+    //                     if input_results.is_empty() {
+    //                         return input_results;
+    //                     }
+
+    //                     // I cloned input_results while it still only has the columns representing the input variables
+    //                     let result_clone = input_results.clone();
+
+    //                     // println!("physical op = {physicalop:?}");
+
+    //                     // let models = Self::execute_with_ids(physicalop, database);
+    //                     // // let numModels = models.len();
+                    
+    //                     // // Vector of HashMaps which have a single key-value pair
+    //                     // // Each of the HashMaps have the same key: the variable storing the machine learning models
+    //                     // let namelist: Vec<HashMap<String, String>> = models.clone().into_iter()
+    //                     // .map(|id_result| {
+    //                     //     let dict = database.dictionary.read().unwrap();
+    //                     //     let result = id_result
+    //                     //     .into_iter()
+    //                     //     // maps the id of a model name value to the model value itself
+    //                     //     .map(|(var, id)| (var, dict.decode(id).unwrap().to_string()))
+    //                     //     .collect();
+    //                     //     drop(dict);
+    //                     //     result
+    //                     // })
+    //                     // .collect();
+    //                     // println!("[RUN_ML_CLAUSE] Models retrieved: {namelist:?}");
+
+    //                     let input_data = Self::extract_ml_input_data(&input_results, input_variables, database);
+
+    //                     let model_id_dict = &models[0];
+    //                     let model_name_dict = &namelist[0];
+    //                     for ((modelvarname, modelname), modelid) in zip(model_name_dict, model_id_dict.values()){
+    //                         for j in 0..input_results.len() {
+    //                             input_results[j].insert(modelvarname.clone(), *modelid);
+    //                         }
+    //                         match Self::invoke_run_ml_handler(model_path, modelname, input_data.clone()){
+    //                             Ok(predictions) => {
+    //                                 input_results = Self::merge_ml_predictions(input_results, predictions, output_variable, database);
+    //                             }
+    //                             Err(e) => {
+    //                                 eprintln!("[RUN_ML_CLAUSE] Error executing ML model: {}", e);
+    //                                 return input_results;
+    //                             }
+    //                         }
+    //                     }
+
+    //                     for i in 1..models.len() {
+    //                         let model_id_dict = &models[i];
+    //                         let model_name_dict = &namelist[i];
+    //                         for ((modelvarname, modelname), modelid) in zip(model_name_dict, model_id_dict.values()){
+    //                             let mut cloned_inputs = result_clone.clone();
+    //                             for j in 0..cloned_inputs.len() {
+    //                                 cloned_inputs[j].insert(modelvarname.clone(), *modelid);
+    //                             }
+    //                             for &result in result_clone.iter() {
+    //                                 if let Some(prediction) = self.predictionMemo.get((modelname.clone(), result)) {
+                                        
+    //                                 }
+    //                             }
+
+
+    //                             if let Some(predictions) = self.predictionMemo.get((modelname.clone(), cloned_inputs.clone())) {
+    //                                 cloned_inputs = Self::merge_ml_predictions(cloned_inputs, predictions.clone(), output_variable, database);
+    //                             }
+    //                             else {
+    //                                 match Self::invoke_run_ml_handler(model_path, modelname, input_data.clone()){
+    //                                     Ok(predictions) => {
+    //                                         self.predictionMemo.insert((modelname.clone(), cloned_inputs.clone()), predictions);
+    //                                         cloned_inputs = Self::merge_ml_predictions(cloned_inputs, predictions, output_variable, database);
+    //                                     }
+    //                                     Err(e) => {
+    //                                         eprintln!("[RUN_ML_CLAUSE] Error executing ML model: {}", e);
+    //                                         return input_results;
+    //                                     }
+    //                                 }
+    //                             }
+                                
+    //                             input_results.append(&mut cloned_inputs);
+    //                         }
+    //                     }  
+    //                     input_results                     
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     /// Extracts input data for ML prediction from query results
     fn extract_ml_input_data(
@@ -646,6 +1027,31 @@ impl ExecutionEngine {
         input_results
     }
 
+    // fn merge_ml_predictions_eunmlclause(
+    //     mut input_results: Vec<HashMap<String, u32>>,
+    //     predictions: MLPredictionResult,
+    //     output_variable: &str,
+    //     ml_variable: &str,
+    //     ml_model: &str,
+    //     database: &mut SparqlDatabase,
+    // ) -> Vec<HashMap<String, u32>> {
+    //     let output_var = output_variable.strip_prefix('?').unwrap_or(output_variable);
+        
+    //     let mut dict = database.dictionary.write().unwrap();
+    //     for (i, prediction) in predictions.predictions.iter().enumerate() {
+    //         if i < input_results.len() {
+    //             let prediction_str = prediction.to_string();
+    //             let prediction_id = dict.encode(&prediction_str);
+    //             input_results[i].insert(output_var.to_string(), prediction_id);
+    //             input_results[i].insert(ml_variable.to_string(), )
+    //         }
+    //     }
+    //     drop(dict);
+        
+    //     println!("[ML.PREDICT] Successfully added {} predictions", predictions.predictions.len());
+    //     input_results
+    // }
+
     /// Executes a table scan with ID-based results
     fn execute_table_scan_with_ids(
         database: &SparqlDatabase,
@@ -746,8 +1152,9 @@ impl ExecutionEngine {
         .collect();
 
         pattern_estimates.sort_by_key(|(_, card)| *card);
-        println!("patterns = {patterns:?}");
-        println!("patterns estimates = {pattern_estimates:?}");
+        
+        //println!("patterns = {patterns:?}");
+        //println!("patterns estimates = {pattern_estimates:?}");
 
         // Execute the MOST SELECTIVE pattern first
         let (most_selective_idx, first_card) = pattern_estimates[0];
@@ -755,7 +1162,7 @@ impl ExecutionEngine {
 
         let mut results = Self::execute_index_scan_with_ids(database, most_selective_pattern);
 
-        println!("found results is = {results:?}");
+        //println!("found results is = {results:?}");
 
         if results.is_empty() {
             return Vec::new();
@@ -803,14 +1210,13 @@ impl ExecutionEngine {
                 .into_par_iter()
                 .flat_map(|binding| {
                     if let Some(&join_value) = binding.get(join_var_stripped) {
-                        println!("got join value = {join_value:?}");
                         let mut bound_bindings = HashMap::new();
                         bound_bindings.insert(join_var_stripped.to_string(), join_value);
 
                         let bound_pattern = Self::bind_pattern(pattern, &bound_bindings);
-                        println!("pattern being checked = {bound_pattern:?}");
+                        // println!("[STAR_JOIN] Pattern being checked: {bound_pattern:?}");
                         let matches = Self::execute_index_scan_with_ids(database, &bound_pattern);
-                        println!("found matches = {matches:?}");
+                        // println!("[STAR_JOIN] Matches found for that pattern = {matches:?}");
 
                         matches
                         .into_iter()
@@ -1076,19 +1482,19 @@ impl ExecutionEngine {
         database: &mut SparqlDatabase,
     ) -> Vec<HashMap<String, u32>> {
         // Execute left side first
-        println!("parallel join physical operator = {left:?}");
+        //println!("parallel join physical operator = {left:?}");
         let left_results = Self::execute_with_ids(left, database);
-        println!("left result = {left_results:?}");
+        //println!("left result = {left_results:?}");
 
         // If right side is an index scan, use bind join
         if let Some(right_pattern) = Self::extract_pattern(right) {
-            println!("right pattern = {right_pattern:?}");
+            //println!("right pattern = {right_pattern:?}");
             return Self::execute_bind_join_with_ids(left_results, right_pattern, database);
         }
 
         // Execute right side
         let right_results = Self::execute_with_ids(right, database);
-        println!("right result = {right_results:?}");
+        // println!("right result = {right_results:?}");
 
         // If both sides are sorted by join key, use merge join
         if Self::can_use_merge_join(&left_results, &right_results) {
@@ -1385,7 +1791,7 @@ impl ExecutionEngine {
 
             // FULLY UNBOUND (0 constants, 3 variables) - table scan is appropriate
             (Term::Variable(s), Term::Variable(p), Term::Variable(o)) => {
-                println!("INFO: Full table scan for fully unbound pattern (? {}, ?{}, ?{})", s, p, o);
+                // println!("INFO: Full table scan for fully unbound pattern (? {}, ?{}, ?{})", s, p, o);
                 Self::execute_table_scan_with_ids(database, pattern)
             }
 
@@ -1457,9 +1863,9 @@ impl ExecutionEngine {
         // Strip '?' prefix from variable name
         let subject_var = subject_var.strip_prefix('?').unwrap_or(&subject_var).to_string();
 
-        println!("scanned index = {predicate}");
+        // println!("scanned index = {predicate}");
         if let Some(obj_map) = database.index_manager.pos.get(&predicate) {
-            println!("found object = {obj_map:?}");
+            // println!("found object = {obj_map:?}");
             if let Some(subjects) = obj_map.get(&object) {
                 // Use iterator with pre-sized HashMap
                 subjects.iter().map(|&subject| {
@@ -1514,7 +1920,7 @@ impl ExecutionEngine {
         let subject_var = subject_var.strip_prefix('?').unwrap_or(&subject_var).to_string();
         let object_var = object_var.strip_prefix('?').unwrap_or(&object_var).to_string();
 
-        println!("objects retrieved: {predicate:?}");
+        // println!("objects retrieved: {predicate:?}");
 
         if let Some(obj_map) = database.index_manager.pos.get(&predicate) {
             // Clone variable names once before flat_map
