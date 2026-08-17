@@ -1,0 +1,22 @@
+contourpy==1.3.3
+cycler==0.12.1
+fonttools==4.63.0
+joblib==1.5.3
+kiwisolver==1.5.0
+matplotlib==3.11.1
+-e git+ssh://git@github.com/SrinjoySanyal/Kolibrie.git@b0f53b5788aee7288d441003326e9585f3348473#egg=mlschema&subdirectory=ml/src
+numpy==2.4.4
+packaging==26.0
+pandas==3.0.3
+pillow==12.3.0
+psutil==7.2.2
+psutils==3.3.14
+puremagic==2.2.0
+pyparsing==3.3.2
+pypdf==6.10.0
+python-dateutil==2.9.0.post0
+rdflib==7.6.0
+scikit-learn==1.8.0
+scipy==1.17.1
+six==1.17.0
+threadpoolctl==3.6.0
