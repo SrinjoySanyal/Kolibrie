@@ -697,7 +697,7 @@ WHERE {
     let complexQuery2 = r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
     PREFIX mls: <http://www.w3.org/ns/mls#>
     PREFIX ext: <http://www.thesisextension.org/runml#>
-    SELECT ?machine ?prediction ?runtime ?alarm ?alarmAction ?impactLevel 
+    SELECT ?machine ?prediction ?runtime ?alarm ?alarmAction ?team 
 WHERE {
 	?machine <http://example.org#humidValue> ?humid.
 	?machine <http://example.org#tempValue> ?temp.

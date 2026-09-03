@@ -481,6 +481,10 @@ fn runQuery(db: &mut SparqlDatabase, filteringQuery: &str, machines: u128) -> (V
         cardinality.push(machines);
     }
 
+    println!("intell plan = {:?}", format!("{filter_lo:?}"));
+
+    println!("dumb plan = {:?}", format!("{normal_lo:?}"));
+
     return (cardinality, intelligentRuns, naiveRuns);
 }
 
@@ -496,7 +500,7 @@ fn main() -> PolarsResult<()> {
     ?machine <http://example.org#hasAlarm> ?alarm.
     ?alarm <http://example.org#activationType> ?activ.
 	FILTER(?humid < 40)
-    RUN {?humid, ?temp, ?energy, ?vibr} ON ?runtime TO ?prediction
+    RUN {?humid, ?temp, ?energy, ?vibr} ON ?runtime TO ?prediction.
 }"#;
 
 return evaluate_query(bubbleUpQuery);

@@ -475,7 +475,7 @@ pub fn build_logical_plan_filter(
                 ml_retrieval_logical_op = LogicalOperator::join(ml_retrieval_logical_op, LogicalOperator::scan(pattern4));
                 ml_retrieval_logical_op = LogicalOperator::projection(ml_retrieval_logical_op, Vec::from(["?modelname".to_string()]));
 
-                result = insert_ml_run_clause_logical_op(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
+                result = insert_ml_run_clause_logical_op_filter_pushdown(currentDepth, &replacementDepth, &insertionMLRun, Some(ml_retrieval_logical_op), &(ml_run_clause_value.run), ml_run_clause_value.to);
             } 
             else {
                 let pattern1 = convert_pattern_to_triple(ml_run_clause_value.on, "rdf:type", "mls:Run", prefixes, database);
@@ -736,6 +736,7 @@ pub fn build_logical_plan(
         // will have as its left argument a LogicalOperator that collects all the variables passed as argument to
         // the RUN clause of the Run Ml Clause 
         let replacementDepth = maxdepth + 1;
+        println!("current depth = {:?}, repl depth = {:?}", currentDepth, replacementDepth);
         
         
         if ml_models_var.is_none() {
@@ -1052,6 +1053,7 @@ fn insert_ml_run_clause_logical_op(
             }
             LogicalOperator::Join { left, right } => {
                 if let Some(ml_model_retrieval_operator) = ml_model_retrieval {
+                    // println!("I reached here");
                     return LogicalOperator::run_ml_clause_lo(logicalOp.clone(), ml_model_retrieval_operator, input_vars.clone().iter().map(|inp| inp.to_string()).collect(), output_var.to_string());
                 }
             }
@@ -1245,7 +1247,7 @@ fn insert_ml_run_clause_logical_op_filter_pushdown(
             }
         }
         LogicalOperator::Join { ref left, ref right } => {
-            let left_new = insert_ml_run_clause_logical_op(currentDepth - 1, replacementDepth, left.as_ref(), ml_model_retrieval, input_vars, output_var);
+            let left_new = insert_ml_run_clause_logical_op_filter_pushdown(currentDepth - 1, replacementDepth, left.as_ref(), ml_model_retrieval, input_vars, output_var);
             return LogicalOperator::join(left_new, *right.clone())
         }
         _ => {logicalOp.clone()}

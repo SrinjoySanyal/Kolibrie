@@ -243,12 +243,14 @@ impl Streamertail {
     ) -> LogicalOperator {
         match logicalOp {
             LogicalOperator::Join { left, right } => {
+                // remove the MLPredict Logical Operator from the Logical Plan
                 let removed_ml = LogicalOperator::join(self.get_lo_without_ml(left), self.get_lo_without_ml(right));
-                if (self.estimate_logical_cost(logicalOp) < self.estimate_logical_cost(mlinput)){
-                    return LogicalOperator::run_ml_clause_lo(logicalOp.clone(), mlinput.clone(), input_variables, output_var)
+                
+                if (self.estimate_output_cardinality_from_logical(&removed_ml) < self.estimate_output_cardinality_from_logical(mlinput)){
+                    return LogicalOperator::run_ml_clause_lo(removed_ml, mlretrieval.clone(), input_variables, output_var)
                 }
                 // This function needs to be applied before a Join reordering, meaning that the joins are left-deep
-                return self.bubble_up_runmlclause(left, mlinput, mlretrieval, input_variables, output_var)
+                return LogicalOperator::join(self.bubble_up_runmlclause(left, mlinput, mlretrieval, input_variables, output_var), right.as_ref().clone());
             }
             LogicalOperator::Scan {..} => {
                 return logicalOp.clone();
@@ -285,7 +287,7 @@ impl Streamertail {
             LogicalOperator::MLPredict { input, model_name, input_variables, output_variable } => {
                 match model_name {
                     ModelGetter::RunMLClause(lo) => {
-                        return lo.as_ref().clone();
+                        return input.as_ref().clone();
                     }
                     ModelGetter::MLPredict(name) => {
                         return logicalOp.clone();
@@ -301,6 +303,7 @@ impl Streamertail {
             LogicalOperator::Selection {..} => {
                 return logicalOp.clone();
             }
+            // Called from a Join, so there cannot be a Projection Logical Operator
             LogicalOperator::Projection {..} => {
                 return logicalOp.clone();
             }
@@ -321,7 +324,7 @@ impl Streamertail {
             LogicalOperator::MLPredict { input, model_name, input_variables, output_variable } => {
                 match model_name {
                     ModelGetter::RunMLClause(op) => {
-                        return Some((logicalOp.clone(), op.as_ref().clone(), input_variables.clone(), output_variable.clone()));
+                        return Some((input.as_ref().clone(), op.as_ref().clone(), input_variables.clone(), output_variable.clone()));
                     }
                     _ => {return None;}
                 }

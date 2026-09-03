@@ -104,7 +104,7 @@ fn generate_data(data: &String, numMachines: usize) -> Result<String, PolarsErro
         }
     }
 
-    for job in ((numMachines / 4) - 250)..(numMachines / 2) {
+    for job in ((numMachines / 4) - 250)..(numMachines / 4) {
         let jobStr = format!(r#"<http://example.org#job{}> <http://example.org#hasAccess> <http://example.org#machine{}> .
             "#, job, job);
         data_n = format!("{}{}", data_n, jobStr);
@@ -454,6 +454,10 @@ fn runQuery(db: &mut SparqlDatabase, simpleQuery: &str, machines: u128) -> (Vec<
         intelligentRuns.push(intell_time);
         println!("Intelligent Time = {:?}", intell_time);
 
+        println!("intell plan = {:?}", format!("{intell_po:?}"));
+
+        println!("dumb plan = {:?}", format!("{naive_po:?}"));
+
         cardinality.push(machines);
     }
 
@@ -470,7 +474,7 @@ fn main() -> PolarsResult<()> {
     ?machine <http://example.org#powerValue> ?energy.
     ?machine <http://example.org#vibrValue> ?vibr.
 	?job <http://example.org#hasAccess> ?machine.
-    RUN {?humid, ?temp, ?energy, ?vibr} ON ?runtime TO ?prediction
+    RUN {?humid, ?temp, ?energy, ?vibr} ON ?runtime TO ?prediction.
 }"#;
 
 return evaluate_query(bubbleUpQuery);
