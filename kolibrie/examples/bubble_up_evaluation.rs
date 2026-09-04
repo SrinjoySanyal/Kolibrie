@@ -454,9 +454,9 @@ fn runQuery(db: &mut SparqlDatabase, simpleQuery: &str, machines: u128) -> (Vec<
         intelligentRuns.push(intell_time);
         println!("Intelligent Time = {:?}", intell_time);
 
-        println!("intell plan = {:?}", format!("{intell_po:?}"));
+        println!("bubble up application plan = {:?}", format!("{intell_po:?}"));
 
-        println!("dumb plan = {:?}", format!("{naive_po:?}"));
+        println!("default plan = {:?}", format!("{naive_po:?}"));
 
         cardinality.push(machines);
     }

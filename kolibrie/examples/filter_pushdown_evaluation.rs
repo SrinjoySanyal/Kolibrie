@@ -481,9 +481,9 @@ fn runQuery(db: &mut SparqlDatabase, filteringQuery: &str, machines: u128) -> (V
         cardinality.push(machines);
     }
 
-    println!("intell plan = {:?}", format!("{filter_lo:?}"));
+    println!("filter pushdown plan = {:?}", format!("{filter_lo:?}"));
 
-    println!("dumb plan = {:?}", format!("{normal_lo:?}"));
+    println!("default plan = {:?}", format!("{normal_lo:?}"));
 
     return (cardinality, intelligentRuns, naiveRuns);
 }
